@@ -1,0 +1,28 @@
+# NetFM default configuration
+
+pretrain:
+  epochs: 100
+  lr: 0.001
+  batch_size: 256
+  mask_ratio: 0.15
+  edge_drop_ratio: 0.10
+  lambda_mask: 1.0
+  lambda_link: 1.0
+  lambda_subgraph: 1.0
+
+model:
+  hidden_dim: 256
+  num_layers: 3
+  dropout: 0.1
+  aggregator: "mean"
+
+features:
+  - degree
+  - clustering_coefficient
+  - pagerank
+  - triangles
+  - kcore
+  - eigenvector_centrality
+
+eval:
+  settings: ["zero_shot", "10_shot", "full"]
