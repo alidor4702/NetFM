@@ -268,8 +268,7 @@ def show_2d(coords, edges, node_colors, node_sizes, node_text,
     brushes = [pg.mkBrush(c[0] * 255, c[1] * 255, c[2] * 255, 230) for c in node_colors]
     scatter = pg.ScatterPlotItem(pos=coords, size=node_sizes,
                                  brush=brushes, pen=pg.mkPen(color="#202830", width=0.5),
-                                 hoverable=True, tip=None)
-    scatter.setData(data=node_text)
+                                 hoverable=True, tip=None, data=node_text)
     plot.addItem(scatter)
 
     # hover label
