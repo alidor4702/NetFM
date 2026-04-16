@@ -251,7 +251,7 @@ def load_coauthor_cs() -> NetFMGraph:
     dataset = Coauthor(root=os.path.join(DATA_ROOT, "Coauthor"), name="CS")
     data = dataset[0]
     return NetFMGraph(
-        name="dblp_coauthor_cs", domain="collaboration", split="pretrain",
+        name="coauthor_cs", domain="collaboration", split="pretrain",
         edge_index=to_undirected(data.edge_index),
         num_nodes=data.num_nodes,
         original_features=data.x.float(),
@@ -306,7 +306,7 @@ def load_ogbn_mag() -> NetFMGraph:
     num_papers = data.num_nodes_dict['paper']
 
     return NetFMGraph(
-        name="ogbn_mag_papers", domain="collaboration", split="held_out",
+        name="ogbn_mag", domain="collaboration", split="held_out",
         edge_index=to_undirected(paper_edge_index),
         num_nodes=num_papers,
         original_features=paper_x,

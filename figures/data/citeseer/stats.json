@@ -1,0 +1,44 @@
+{
+  "name": "citeseer",
+  "domain": "citation",
+  "split": "pretrain",
+  "num_nodes": 3327,
+  "num_edges_undirected": 4552,
+  "density": 0.0008227297529768376,
+  "degree_mean": 2.7363991584009617,
+  "degree_median": 2.0,
+  "degree_std": 3.3808377274990122,
+  "degree_max": 99,
+  "degree_min": 0,
+  "isolated_nodes": 48,
+  "num_connected_components": 438,
+  "largest_cc_fraction": 0.6372107003306282,
+  "avg_clustering_sampled": 0.13951193767927653,
+  "clustering_sample_size": 2000,
+  "has_features": true,
+  "features": {
+    "dim": 3703,
+    "nnz_fraction": 0.008536202581826887,
+    "mean": 0.00853620283305645,
+    "std": 0.0919964611530304,
+    "min": 0.0,
+    "max": 1.0
+  },
+  "labels": {
+    "type": "single",
+    "num_classes": 6,
+    "observed_classes": 6,
+    "majority_fraction": 0.21070033062819357,
+    "minority_fraction": 0.0793507664562669,
+    "entropy_nats": 1.7532998553103325,
+    "entropy_max": 1.791759469228055,
+    "class_counts": [
+      264,
+      590,
+      668,
+      701,
+      596,
+      508
+    ]
+  }
+}

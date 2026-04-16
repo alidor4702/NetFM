@@ -1,0 +1,21 @@
+{
+  "name": "dblp_snap",
+  "domain": "collaboration",
+  "split": "pretrain",
+  "num_nodes": 317080,
+  "num_edges_undirected": 1049866,
+  "density": 2.08846661642591e-05,
+  "degree_mean": 6.622089062697111,
+  "degree_median": 4.0,
+  "degree_std": 10.007707652823282,
+  "degree_max": 343,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 1,
+  "largest_cc_fraction": 1.0,
+  "avg_clustering_sampled": 0.6266538294678299,
+  "clustering_sample_size": 2000,
+  "has_features": false,
+  "features": null,
+  "labels": null
+}

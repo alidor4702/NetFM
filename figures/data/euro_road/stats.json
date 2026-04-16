@@ -1,0 +1,21 @@
+{
+  "name": "euro_road",
+  "domain": "infrastructure",
+  "split": "held_out",
+  "num_nodes": 1174,
+  "num_edges_undirected": 1417,
+  "density": 0.002057944872638338,
+  "degree_mean": 2.41396933560477,
+  "degree_median": 2.0,
+  "degree_std": 1.188678457809932,
+  "degree_max": 10,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 26,
+  "largest_cc_fraction": 0.8850085178875639,
+  "avg_clustering_sampled": 0.016731564857629597,
+  "clustering_sample_size": 1174,
+  "has_features": false,
+  "features": null,
+  "labels": null
+}

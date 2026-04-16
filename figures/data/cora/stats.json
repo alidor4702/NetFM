@@ -1,0 +1,45 @@
+{
+  "name": "cora",
+  "domain": "citation",
+  "split": "pretrain",
+  "num_nodes": 2708,
+  "num_edges_undirected": 5278,
+  "density": 0.0014399999126942077,
+  "degree_mean": 3.8980797636632203,
+  "degree_median": 3.0,
+  "degree_std": 5.227818372799966,
+  "degree_max": 168,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 78,
+  "largest_cc_fraction": 0.9176514032496307,
+  "avg_clustering_sampled": 0.23671169985272666,
+  "clustering_sample_size": 2000,
+  "has_features": true,
+  "features": {
+    "dim": 1433,
+    "nnz_fraction": 0.012682692515830173,
+    "mean": 0.012682692147791386,
+    "std": 0.11190106719732285,
+    "min": 0.0,
+    "max": 1.0
+  },
+  "labels": {
+    "type": "single",
+    "num_classes": 7,
+    "observed_classes": 7,
+    "majority_fraction": 0.3020679468242245,
+    "minority_fraction": 0.06646971935007386,
+    "entropy_nats": 1.8311164560558915,
+    "entropy_max": 1.9459101490553132,
+    "class_counts": [
+      351,
+      217,
+      418,
+      818,
+      426,
+      298,
+      180
+    ]
+  }
+}

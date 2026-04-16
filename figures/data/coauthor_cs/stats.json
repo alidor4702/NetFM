@@ -1,0 +1,53 @@
+{
+  "name": "coauthor_cs",
+  "domain": "collaboration",
+  "split": "pretrain",
+  "num_nodes": 18333,
+  "num_edges_undirected": 81894,
+  "density": 0.00048734744416454727,
+  "degree_mean": 8.93405334642448,
+  "degree_median": 6.0,
+  "degree_std": 9.106805392763793,
+  "degree_max": 136,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 1,
+  "largest_cc_fraction": 1.0,
+  "avg_clustering_sampled": 0.3378685736476759,
+  "clustering_sample_size": 2000,
+  "has_features": true,
+  "features": {
+    "dim": 6805,
+    "nnz_fraction": 0.008753714699161119,
+    "mean": 0.008753715083003044,
+    "std": 0.09315089881420135,
+    "min": 0.0,
+    "max": 1.0
+  },
+  "labels": {
+    "type": "single",
+    "num_classes": 15,
+    "observed_classes": 15,
+    "majority_fraction": 0.2256041018927617,
+    "minority_fraction": 0.006436480663284787,
+    "entropy_nats": 2.408703895490125,
+    "entropy_max": 2.70805020110221,
+    "class_counts": [
+      708,
+      462,
+      2050,
+      429,
+      1394,
+      2193,
+      371,
+      924,
+      775,
+      118,
+      1444,
+      2033,
+      420,
+      4136,
+      876
+    ]
+  }
+}

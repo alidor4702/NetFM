@@ -1,0 +1,41 @@
+{
+  "name": "pubmed",
+  "domain": "citation",
+  "split": "pretrain",
+  "num_nodes": 19717,
+  "num_edges_undirected": 44324,
+  "density": 0.00022803908825811382,
+  "degree_mean": 4.496018664096972,
+  "degree_median": 2.0,
+  "degree_std": 7.431003104853955,
+  "degree_max": 171,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 1,
+  "largest_cc_fraction": 1.0,
+  "avg_clustering_sampled": 0.05695204419041448,
+  "clustering_sample_size": 2000,
+  "has_features": true,
+  "features": {
+    "dim": 500,
+    "nnz_fraction": 0.10022123041030583,
+    "mean": 0.003927198238670826,
+    "std": 0.017593812197446823,
+    "min": 0.0,
+    "max": 1.2633097171783447
+  },
+  "labels": {
+    "type": "single",
+    "num_classes": 3,
+    "observed_classes": 3,
+    "majority_fraction": 0.39940153167317544,
+    "minority_fraction": 0.20809453770857636,
+    "entropy_nats": 1.0602981066510138,
+    "entropy_max": 1.0986122886681098,
+    "class_counts": [
+      4103,
+      7739,
+      7875
+    ]
+  }
+}

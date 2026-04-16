@@ -1,0 +1,21 @@
+{
+  "name": "power_grid",
+  "domain": "infrastructure",
+  "split": "pretrain",
+  "num_nodes": 4941,
+  "num_edges_undirected": 6594,
+  "density": 0.0005403026973346214,
+  "degree_mean": 2.66909532483303,
+  "degree_median": 2.0,
+  "degree_std": 1.7912722617587216,
+  "degree_max": 19,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 1,
+  "largest_cc_fraction": 1.0,
+  "avg_clustering_sampled": 0.08154115606615606,
+  "clustering_sample_size": 2000,
+  "has_features": false,
+  "features": null,
+  "labels": null
+}

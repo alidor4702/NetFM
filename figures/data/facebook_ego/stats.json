@@ -1,0 +1,21 @@
+{
+  "name": "facebook_ego",
+  "domain": "social",
+  "split": "pretrain",
+  "num_nodes": 4167,
+  "num_edges_undirected": 89062,
+  "density": 0.010260763392409163,
+  "degree_mean": 42.74634029277658,
+  "degree_median": 25.0,
+  "degree_std": 51.5912915005699,
+  "degree_max": 1044,
+  "degree_min": 1,
+  "isolated_nodes": 0,
+  "num_connected_components": 10,
+  "largest_cc_fraction": 0.2507799376049916,
+  "avg_clustering_sampled": 0.6123687359307537,
+  "clustering_sample_size": 2000,
+  "has_features": false,
+  "features": null,
+  "labels": null
+}

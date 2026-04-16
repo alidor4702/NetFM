@@ -8,8 +8,7 @@ venv/
 *.pt
 *.pth
 *.ckpt
-data/raw/
-data/processed/
+/data/
 logs/
 outputs/
 wandb/
