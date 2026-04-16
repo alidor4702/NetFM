@@ -5,8 +5,16 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        DATA PIPELINE                                │
-│  15+ graphs (SNAP/OGB) → unified format → structural features       │
-│  Split: pre-training corpus (10+) │ held-out evaluation (5)         │
+│  15 graphs (SNAP/OGB/PyG) → unified format                         │
+│  Split: pre-training corpus (10) │ held-out evaluation (5)          │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     FEATURE ENGINEERING                              │
+│  Structural features (6-dim, topology) — universal for all graphs   │
+│  SVD-compressed original features (d-dim) — domain info preserved   │
+│  Combined: structural + SVD → input to GNN                          │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
                            ▼
@@ -36,24 +44,36 @@
 
 ### 2.1 Dataset Inventory
 
-| Domain         | Dataset              | Source   | Nodes     | Edges      | Directed | Has Labels | Role       |
-|----------------|----------------------|----------|-----------|------------|----------|------------|------------|
-| **Social**     | Facebook ego-nets    | SNAP     | ~4K       | ~88K       | No       | Yes (circles) | Pre-train  |
-| **Social**     | Twitch EN            | SNAP     | ~7.1K     | ~35.3K     | No       | Yes (binary) | Pre-train  |
-| **Social**     | LastFM Asia          | SNAP     | ~7.6K     | ~27.8K     | No       | Yes (country) | **Held-out** |
-| **Citation**   | Cora                 | PyG      | 2,708     | 10,556     | No       | Yes (7 classes) | Pre-train  |
-| **Citation**   | CiteSeer             | PyG      | 3,327     | 9,104      | No       | Yes (6 classes) | Pre-train  |
-| **Citation**   | PubMed               | PyG      | 19,717    | 88,648     | No       | Yes (3 classes) | Pre-train  |
-| **Citation**   | ogbn-arxiv           | OGB      | 169,343   | 1,166,243  | Yes      | Yes (40 classes) | **Held-out** |
-| **Biological** | PPI                  | PyG      | ~56.9K    | ~818K      | No       | Yes (multilabel) | Pre-train  |
-| **Biological** | ogbn-proteins        | OGB      | 132,534   | 39,561,252 | No       | Yes (multilabel) | **Held-out** |
-| **Infra**      | US Power Grid        | SNAP     | 4,941     | 6,594      | No       | No         | Pre-train  |
-| **Infra**      | AS-733               | SNAP     | ~7.7K     | ~26K       | No       | No         | Pre-train  |
-| **Infra**      | Euro Road            | SNAP     | 1,174     | 1,417      | No       | No         | **Held-out** |
-| **Collab**     | DBLP                 | SNAP     | ~317K     | ~1.05M     | No       | Yes (communities) | Pre-train  |
-| **Collab**     | ogbn-mag             | OGB      | 1,939,743 | 21,111,007 | Yes      | Yes (349 classes) | **Held-out** |
+**Pre-training corpus** (10 datasets — model trains on these, never evaluated on them):
 
-> **Held-out rule**: one dataset per domain is never seen during pre-training and is used exclusively for downstream evaluation.
+| Domain         | Dataset              | Source | Loader                              | Nodes     | Edges      | Directed | Original Features          | Has Labels     |
+|----------------|----------------------|--------|--------------------------------------|-----------|------------|----------|----------------------------|----------------|
+| Social         | Facebook ego-nets    | PyG    | `SNAPDataset(name='ego-facebook')`   | ~4K       | ~88K       | No       | Ego features (variable)    | No             |
+| Social         | Twitch EN            | PyG    | `Twitch(name='EN')`                 | ~7.1K     | ~35.3K     | No       | 7-dim user attributes      | Yes (binary)   |
+| Citation       | Cora                 | PyG    | `Planetoid(name='Cora')`            | 2,708     | 10,556     | No       | 1,433-dim word embeddings  | Yes (7 classes) |
+| Citation       | CiteSeer             | PyG    | `Planetoid(name='CiteSeer')`        | 3,327     | 9,104      | No       | 3,703-dim word embeddings  | Yes (6 classes) |
+| Citation       | PubMed               | PyG    | `Planetoid(name='PubMed')`          | 19,717    | 88,648     | No       | 500-dim TF-IDF             | Yes (3 classes) |
+| Biological     | PPI                  | PyG    | `PPI(split='train')`                | ~56.9K    | ~818K      | No       | 50-dim gene features       | Yes (121 multilabel) |
+| Infrastructure | US Power Grid        | Manual | KONECT download (TSV edge list)      | 4,941     | 6,594      | No       | None                       | No             |
+| Infrastructure | AS-733               | Manual | SNAP download (edge list snapshots)  | ~7.7K     | ~26K       | No       | None                       | No             |
+| Collaboration  | DBLP Coauthor CS     | PyG    | `Coauthor(name='CS')`               | 18,333    | 163,788    | No       | 6,805-dim keyword vectors  | Yes (15 classes) |
+| Collaboration  | DBLP (SNAP)          | Manual | SNAP download (edge list + communities) | ~317K  | ~1.05M     | No       | None                       | Yes (communities) |
+
+**Held-out evaluation** (5 datasets — one per domain, never seen during pre-training):
+
+| Domain         | Dataset              | Source | Loader                                   | Nodes     | Edges      | Directed | Original Features         | Has Labels       |
+|----------------|----------------------|--------|------------------------------------------|-----------|------------|----------|---------------------------|------------------|
+| Social         | LastFM Asia          | PyG    | `LastFMAsia()`                           | ~7.6K     | ~27.8K     | No       | 128-dim                   | Yes (18 classes) |
+| Citation       | ogbn-arxiv           | OGB    | `PygNodePropPredDataset('ogbn-arxiv')`   | 169,343   | 1,166,243  | Yes      | 128-dim paper embeddings  | Yes (40 classes) |
+| Biological     | ogbn-proteins        | OGB    | `PygNodePropPredDataset('ogbn-proteins')`| 132,534   | 39,561,252 | No       | None (edge features only) | Yes (112 multilabel) |
+| Infrastructure | Euro Road            | Manual | graph-tool/NetworkRepository download     | 1,174     | 1,417      | No       | None                      | No               |
+| Collaboration  | ogbn-mag (papers)    | OGB    | `PygNodePropPredDataset('ogbn-mag')`     | 736,389   | ~5.4M      | Yes      | 128-dim paper embeddings  | Yes (349 classes) |
+
+**Notes:**
+- ogbn-mag is heterogeneous (4 node types). We extract only the **paper-cites-paper** homogeneous subgraph (~736K paper nodes).
+- ogbn-proteins has no node features — only edge features. SVD channel will be empty; the model relies on structural features alone for this graph.
+- AS-733 contains 733 daily snapshots. We use the **last snapshot** (largest, most developed topology).
+- All directed graphs are converted to undirected for pre-training (edges duplicated both ways).
 
 ### 2.2 Unified Graph Format
 
@@ -62,61 +82,116 @@ Every dataset gets normalized to a single internal representation:
 ```python
 @dataclass
 class NetFMGraph:
-    name: str                          # e.g. "cora", "facebook_ego"
-    domain: str                        # "social" | "citation" | "biological" | "infrastructure" | "collaboration"
-    edge_index: Tensor                 # [2, num_edges] — COO format
+    name: str                              # e.g. "cora", "facebook_ego"
+    domain: str                            # "social" | "citation" | "biological" | "infrastructure" | "collaboration"
+    edge_index: Tensor                     # [2, num_edges] — COO format, undirected
     num_nodes: int
-    is_directed: bool
-    node_labels: Optional[Tensor]      # None if no ground truth
+    node_labels: Optional[Tensor]          # None if no ground truth
     num_classes: Optional[int]
+    original_features: Optional[Tensor]    # raw domain features, None if absent
     structural_features: Optional[Tensor]  # [num_nodes, 6] — computed in feature step
-    split: str                         # "pretrain" | "held_out"
+    svd_features: Optional[Tensor]         # [num_nodes, d] — SVD-compressed original features
+    split: str                             # "pretrain" | "held_out"
 ```
-
-All graphs are converted to undirected for pre-training (directed edges are duplicated). The original direction is preserved as metadata for tasks that need it.
 
 ### 2.3 Data Loading Strategy
 
 - **Small/medium graphs** (< 100K nodes): loaded fully into GPU memory as single `Data` objects.
-- **Large graphs** (ogbn-arxiv, ogbn-proteins, DBLP, ogbn-mag): use PyG's `NeighborLoader` for mini-batch sampling during training. Batch size per graph scaled proportionally so each epoch sees roughly the same fraction of nodes.
+- **Large graphs** (ogbn-arxiv, ogbn-proteins, DBLP SNAP, ogbn-mag): use PyG's `NeighborLoader` for mini-batch sampling during training. Batch size per graph scaled proportionally so each epoch sees roughly the same fraction of nodes.
 - All datasets cached locally under `data/raw/` (auto-downloaded on first run) and processed versions saved to `data/processed/`.
 
 ### 2.4 Pre-training Corpus Construction
 
-During pre-training, we sample batches across all pre-training graphs:
+During pre-training, we sample batches across all 10 pre-training graphs:
 
 1. Each epoch iterates over all pre-training graphs.
 2. For small graphs: full-batch forward pass.
 3. For large graphs: `NeighborLoader` with `num_neighbors=[15, 10, 5]` (one per GraphSAGE layer), batch size 256.
-4. Graphs are interleaved (not sequential) to prevent the model from overfitting to one domain before seeing others.
+4. Graphs are **interleaved** (not sequential) to prevent the model from overfitting to one domain before seeing others.
 
 ---
 
-## 3. Structural Node Features
+## 3. Feature Engineering — Dual-Channel Input
 
-### 3.1 Feature Definitions
+The key design decision: NetFM uses **two channels** of node features, combined before the GNN.
 
-Every node in every graph gets a 6-dimensional feature vector. These are domain-agnostic — they encode structural role, not domain semantics.
+```
+Channel 1 — Structural (universal, always available):
+  6 topology features → Linear(6 → d) → structural_embedding [N, d]
 
-| # | Feature                    | Definition                                                        | Library           |
-|---|----------------------------|-------------------------------------------------------------------|--------------------|
-| 1 | **Degree**                 | Number of edges incident to the node. For directed graphs: in-degree + out-degree. | NetworkX / PyG    |
-| 2 | **Local Clustering Coeff** | Fraction of pairs of neighbors that are connected to each other.  | NetworkX          |
-| 3 | **PageRank**               | Stationary distribution of a random walk with damping factor 0.85.| NetworkX          |
-| 4 | **Triangle Count**         | Number of triangles the node participates in.                     | NetworkX          |
-| 5 | **K-core Number**          | Maximum k such that the node belongs to the k-core subgraph.     | NetworkX          |
-| 6 | **Eigenvector Centrality** | Leading eigenvector of the adjacency matrix (power iteration).    | NetworkX          |
+Channel 2 — SVD-compressed domain features (when original features exist):
+  Original features [N, F] → SVD truncation → svd_features [N, d]
+  (or zeros [N, d] if no original features)
 
-### 3.2 Normalization
+Combined input:
+  node_input = structural_embedding + svd_features  →  [N, d]  →  GNN
+```
 
-Each feature is normalized **per-graph** to zero mean and unit variance. This prevents a single large graph from dominating the feature scale. Features with zero variance (e.g., clustering coefficient in a tree) are set to 0.
+### 3.1 Channel 1: Structural Features
 
-### 3.3 Computation Concerns
+Every node in every graph gets a 6-dimensional feature vector computed purely from topology.
 
-- **Eigenvector centrality** can fail to converge on disconnected graphs. Fallback: compute per connected component, assign 0 to isolated nodes.
-- **Triangle count** is O(m^{3/2}) — expensive on large graphs. For graphs with > 500K edges, use approximate triangle counting or precompute offline.
-- **PageRank** is fast (power iteration converges in ~50 iterations typically).
-- Features for large OGB graphs are precomputed once and cached.
+| # | Feature                    | Definition                                                        | Library    |
+|---|----------------------------|-------------------------------------------------------------------|------------|
+| 1 | **Degree**                 | Number of edges incident to the node.                             | NetworkX   |
+| 2 | **Local Clustering Coeff** | Fraction of pairs of neighbors that are connected to each other.  | NetworkX   |
+| 3 | **PageRank**               | Stationary distribution of a random walk with damping 0.85.       | NetworkX   |
+| 4 | **Triangle Count**         | Number of triangles the node participates in.                     | NetworkX   |
+| 5 | **K-core Number**          | Maximum k such that the node belongs to the k-core subgraph.     | NetworkX   |
+| 6 | **Eigenvector Centrality** | Leading eigenvector of the adjacency matrix (power iteration).    | NetworkX   |
+
+**Normalization:** Per-graph z-score (zero mean, unit variance). Features with zero variance set to 0.
+
+**Computation concerns:**
+- Eigenvector centrality: can fail on disconnected graphs → compute per connected component, assign 0 to isolated nodes.
+- Triangle count: O(m^{3/2}) → for graphs > 500K edges, precompute offline.
+- All structural features are precomputed once and cached to disk.
+
+**These features are then projected** through a learned `Linear(6 → d)` layer to match the GNN's hidden dimension.
+
+### 3.2 Channel 2: SVD-Compressed Domain Features
+
+For datasets that have original node features (word embeddings, gene expressions, etc.), we preserve that information via SVD compression to a fixed dimension d.
+
+**How SVD feature compression works:**
+
+Given a feature matrix X of shape [N, F] where F is the original feature dimension:
+
+1. Compute SVD: `U, σ, Vᵀ = SVD(X)` — this decomposes X into components ranked by importance.
+2. Truncate to top d components: `X_compressed = U[:, :d] × diag(σ[:d])` → shape [N, d].
+3. If F < d: keep all F components, pad remaining columns with zeros.
+
+This is a **deterministic, parameter-free** operation. No training required. It works on any feature matrix of any dimension and always produces a [N, d] output.
+
+**Inspired by [OpenGraph (EMNLP 2024)](https://arxiv.org/abs/2403.01121)**, which demonstrated that SVD-based feature alignment outperforms one-hot encoding, degree embeddings, and random projections for cross-domain graph transfer. Their zero-shot model beat 5-shot trained baselines on Cora (75.0% vs 58.5%) and CiteSeer (61.0% vs 55.7%).
+
+**Per-dataset SVD results:**
+
+| Dataset           | Original dim | SVD output | Notes                              |
+|-------------------|-------------|------------|------------------------------------|
+| Cora              | 1,433       | [N, 256]   | Compressed, top 256 components     |
+| CiteSeer          | 3,703       | [N, 256]   | Compressed                         |
+| PubMed            | 500         | [N, 256]   | Compressed                         |
+| PPI               | 50          | [N, 256]   | 50 real + 206 zero-padded          |
+| Twitch EN         | 7           | [N, 256]   | 7 real + 249 zero-padded           |
+| DBLP Coauthor CS  | 6,805       | [N, 256]   | Compressed                         |
+| LastFM Asia       | 128         | [N, 256]   | 128 real + 128 zero-padded         |
+| ogbn-arxiv        | 128         | [N, 256]   | 128 real + 128 zero-padded         |
+| ogbn-mag (papers) | 128         | [N, 256]   | 128 real + 128 zero-padded         |
+| Facebook ego      | variable    | [N, 256]   | SVD on whatever features exist     |
+| Power Grid        | 0           | [N, 256]   | All zeros                          |
+| AS-733            | 0           | [N, 256]   | All zeros                          |
+| Euro Road         | 0           | [N, 256]   | All zeros                          |
+| ogbn-proteins     | 0           | [N, 256]   | All zeros (edge features only)     |
+| DBLP (SNAP)       | 0           | [N, 256]   | All zeros                          |
+
+### 3.3 Why Two Channels?
+
+- **Structural-only** would lose domain semantics (word embeddings, gene data) → poor node classification.
+- **SVD-only** would fail on graphs without features (power grid, road networks) → limited universality.
+- **Combined** gives both: structural channel enables cross-domain transfer, SVD channel preserves per-domain richness.
+
+This also enables a clean **ablation study**: structural-only vs SVD-only vs combined. Useful for RQ2 (which tasks benefit from which channel).
 
 ---
 
@@ -125,39 +200,41 @@ Each feature is normalized **per-graph** to zero mean and unit variance. This pr
 ### 4.1 GraphSAGE Encoder
 
 ```
-Input: [num_nodes, 6] structural features
-    │
-    ▼
-┌─────────────────────────┐
-│  Linear(6 → hidden_dim) │   ← input projection
-│  + BatchNorm + ReLU     │
-└────────────┬────────────┘
-             │
-     ┌───────▼───────┐
-     │  SAGEConv L1  │   hidden_dim → hidden_dim, aggr="mean"
-     │  + BatchNorm  │
-     │  + ReLU       │
-     │  + Dropout    │
-     └───────┬───────┘
-             │
-     ┌───────▼───────┐
-     │  SAGEConv L2  │   hidden_dim → hidden_dim
-     │  + BatchNorm  │
-     │  + ReLU       │
-     │  + Dropout    │
-     └───────┬───────┘
-             │
-     ┌───────▼───────┐
-     │  SAGEConv L3  │   hidden_dim → hidden_dim
-     │  + BatchNorm  │
-     └───────┬───────┘
-             │
-             ▼
-Output: [num_nodes, hidden_dim] node embeddings
+Structural features [N, 6]     → Linear(6 → d) → struct_emb [N, d]
+SVD features [N, d]            ─────────────────→ svd_emb [N, d]
+                                                       │
+                                          node_input = struct_emb + svd_emb
+                                                       │
+                                                       ▼
+                                              ┌─────────────────┐
+                                              │  BatchNorm + ReLU│
+                                              └────────┬────────┘
+                                                       │
+                                               ┌───────▼───────┐
+                                               │  SAGEConv L1  │  d → d, aggr="mean"
+                                               │  + BatchNorm  │
+                                               │  + ReLU       │
+                                               │  + Dropout    │
+                                               └───────┬───────┘
+                                                       │
+                                               ┌───────▼───────┐
+                                               │  SAGEConv L2  │  d → d
+                                               │  + BatchNorm  │
+                                               │  + ReLU       │
+                                               │  + Dropout    │
+                                               └───────┬───────┘
+                                                       │
+                                               ┌───────▼───────┐
+                                               │  SAGEConv L3  │  d → d
+                                               │  + BatchNorm  │
+                                               └───────┬───────┘
+                                                       │
+                                                       ▼
+                                        Output: [N, d] node embeddings
 ```
 
 **Default hyperparameters:**
-- `hidden_dim`: 256
+- `d` (hidden_dim): 256 (treat as hyperparameter — ablate with 128, 512)
 - `num_layers`: 3
 - `dropout`: 0.1
 - `aggregator`: mean
@@ -171,14 +248,15 @@ Three heads sit on top of the shared encoder. All three are applied simultaneous
 #### Head 1: Masked Feature Reconstruction
 
 ```
-Goal: Predict masked structural features from graph context.
+Goal: Predict masked input features from graph context.
 Analogy: BERT's masked language model.
 
 Procedure:
 1. Randomly select 15% of nodes.
-2. Replace their 6-dim feature vector with a learnable [MASK] token.
+2. Replace their combined input (struct_emb + svd_emb) with a learnable [MASK] token.
 3. Forward pass through encoder.
-4. MLP head: Linear(hidden_dim → hidden_dim) → ReLU → Linear(hidden_dim → 6)
+4. MLP head: Linear(d → d) → ReLU → Linear(d → 6 + d)
+   Predicts both structural features (6) and SVD features (d).
 5. Loss: MSE between predicted and original features (only on masked nodes).
 ```
 
@@ -203,12 +281,12 @@ Purpose: Forces the encoder to explicitly encode structural information.
 
 Procedure:
 1. For each node, precompute targets: [clustering_coeff, normalized_triangle_count].
-2. MLP head: Linear(hidden_dim → hidden_dim) → ReLU → Linear(hidden_dim → 2)
+2. MLP head: Linear(d → d) → ReLU → Linear(d → 2)
 3. Loss: MSE between predicted and actual values.
 
-Note: These targets overlap with input features, but the model must reconstruct
-them from the GNN embedding (which aggregates neighborhood info), not just
-memorize the input — especially since 15% of inputs are masked.
+Note: These targets overlap with structural input features, but the model must
+reconstruct them from the GNN embedding (which aggregates neighborhood info),
+not just memorize the input — especially since 15% of inputs are masked.
 ```
 
 #### Combined Loss
@@ -241,9 +319,9 @@ Tuned on validation split (random 10% of pre-training graphs held aside for loss
 #### Task 1: Node Classification
 
 - **What**: Predict categorical node labels.
-- **How**: Freeze encoder, train a linear probe `Linear(hidden_dim → num_classes)` on top of embeddings.
+- **How**: Freeze encoder, train a linear probe `Linear(d → num_classes)` on top of embeddings.
 - **Metrics**: Accuracy, Macro-F1.
-- **Applicable held-out datasets**: LastFM (country), ogbn-arxiv (paper category), ogbn-proteins (protein function), ogbn-mag (paper venue).
+- **Applicable held-out datasets**: LastFM (18 countries), ogbn-arxiv (40 categories), ogbn-proteins (112 functions), ogbn-mag (349 venues).
 
 #### Task 2: Link Prediction
 
@@ -258,12 +336,12 @@ Tuned on validation split (random 10% of pre-training graphs held aside for loss
 - **What**: Discover community structure.
 - **How**: Freeze encoder, run K-Means on node embeddings (k = number of ground-truth communities).
 - **Metrics**: Normalized Mutual Information (NMI) against ground-truth communities.
-- **Applicable held-out datasets**: LastFM (country clusters), DBLP communities, ogbn-mag (venue clusters).
+- **Applicable held-out datasets**: LastFM (country clusters), ogbn-mag (venue clusters).
 
 #### Task 4: Centrality Estimation
 
 - **What**: Predict node centrality rankings without computing them explicitly.
-- **How**: Freeze encoder, train a linear regressor `Linear(hidden_dim → 1)` to predict betweenness centrality and PageRank.
+- **How**: Freeze encoder, train a linear regressor `Linear(d → 1)` to predict betweenness centrality and PageRank.
 - **Metrics**: Spearman rank correlation with exact values.
 - **Applicable held-out datasets**: All 5.
 
@@ -297,9 +375,12 @@ Tuned on validation split (random 10% of pre-training graphs held aside for loss
 
 Compare NetFM (zero-shot, 10-shot) vs. GCN/GAT from scratch across all tasks and datasets. The key signal: does NetFM with 10 labels beat a GNN trained on hundreds?
 
-### RQ2: Which tasks transfer best?
+### RQ2: Which tasks and channels benefit most?
 
-For each of the 4 tasks, compute the average gap between NetFM zero-shot and from-scratch. Tasks where zero-shot is already competitive = highly transferable. Tasks where it fails = domain-specific.
+- For each of the 4 tasks, compare: structural-only vs. SVD-only vs. combined.
+- Which tasks are driven by topology (structural channel dominant)?
+- Which tasks need domain features (SVD channel dominant)?
+- This is the ablation that justifies the dual-channel design.
 
 ### RQ3: What predicts transfer success?
 
@@ -347,21 +428,21 @@ Correlate these with transfer performance (Pearson/Spearman) to find which graph
 
 ### Workflow
 
-1. User uploads edge list (CSV/TXT) or adjacency matrix.
-2. Backend computes structural features.
+1. User uploads edge list (CSV/TXT) or adjacency matrix, optionally with node features.
+2. Backend computes structural features (always) and SVD-compresses original features (if provided).
 3. Pre-trained NetFM encoder produces embeddings.
 4. Display: graph stats, t-SNE embedding visualization, community coloring, centrality ranking, top-K predicted links.
 
 ---
 
-## 8. Code Structure (Final)
+## 8. Code Structure
 
 ```
 NetFM/
 ├── src/
 │   ├── data.py              # Dataset downloading, loading, unified NetFMGraph format
-│   ├── features.py          # Structural feature computation + normalization
-│   ├── model.py             # GraphSAGE encoder + pre-training heads
+│   ├── features.py          # Structural features + SVD compression + normalization
+│   ├── model.py             # GraphSAGE encoder + dual-channel input + pre-training heads
 │   ├── pretrain.py          # Pre-training loop (multi-graph, multi-objective)
 │   ├── tasks.py             # Downstream task evaluation (4 tasks, 3 settings)
 │   ├── baselines.py         # Classical + GNN baselines
@@ -374,8 +455,8 @@ NetFM/
 │   └── default.yaml         # All hyperparameters
 ├── docs/
 │   ├── proposal.pdf
+│   ├── OpenGraph_EMNLP2024.pdf
 │   └── architecture.md      # This file
-├── tests/
 ├── data/                    # Auto-created, gitignored
 │   ├── raw/
 │   └── processed/
@@ -391,7 +472,7 @@ NetFM/
 | Phase | What                         | Files                        | Milestone                              |
 |-------|------------------------------|------------------------------|----------------------------------------|
 | 1     | Data pipeline                | `src/data.py`                | All 15 graphs load into NetFMGraph     |
-| 2     | Structural features          | `src/features.py`            | 6 features computed for all graphs     |
+| 2     | Feature engineering          | `src/features.py`            | Structural (6-dim) + SVD for all graphs|
 | 3     | Model + pre-training         | `src/model.py`, `src/pretrain.py` | Loss decreasing on training corpus |
 | 4     | Downstream tasks + baselines | `src/tasks.py`, `src/baselines.py` | Full results matrix generated    |
 | 5     | Analysis                     | Notebooks / scripts          | RQ1-3 answered with plots              |
