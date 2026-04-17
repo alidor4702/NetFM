@@ -65,11 +65,33 @@ CLASS_NAMES: dict[str, list[str]] = {
 }
 
 
+# Per-dataset node noun (singular). Cora/CiteSeer/PubMed/arxiv don't ship
+# per-node titles in their public distributions — the best we can do without
+# external joins is to call them by what they represent.
+NODE_TYPE: dict[str, str] = {
+    "cora": "paper", "citeseer": "paper", "pubmed": "paper",
+    "ogbn_arxiv": "paper", "ogbn_mag": "paper",
+    "ppi": "protein", "ogbn_proteins": "protein",
+    "facebook_ego": "user", "twitch_en": "streamer", "lastfm_asia": "listener",
+    "coauthor_cs": "author", "dblp_snap": "author",
+    "power_grid": "station", "as733": "router", "euro_road": "junction",
+}
+
+
 def class_name(dataset: str, class_id: int) -> str:
     names = CLASS_NAMES.get(dataset)
     if names and 0 <= class_id < len(names):
         return names[class_id]
     return f"class {class_id}"
+
+
+def node_label(dataset: str, original_id: int, names: Optional[list] = None) -> str:
+    """Primary display name for one node. Prefers `names[i]` if the dataset
+    shipped human names; otherwise falls back to '<noun> <id>'."""
+    if names is not None and 0 <= original_id < len(names) and names[original_id]:
+        return str(names[original_id])
+    noun = NODE_TYPE.get(dataset, "node")
+    return f"{noun} {int(original_id)}"
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +116,8 @@ class GraphBundle:
     communities: np.ndarray       # Louvain assignments (for community layout)
     sample_method: str
     layout_name: str
+    node_names: Optional[list] = None  # optional human-readable node names
+    stats: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +455,47 @@ def _cache_path(name: str, layout: str, method: str, size: int, dim: int,
     return LAYOUT_CACHE / f"{name}_{layout}_{method}_n{size}_d{dim}_s{s}.npz"
 
 
+def compute_stats(ei: np.ndarray, n: int, communities: np.ndarray,
+                  labels: np.ndarray, label_kind: str) -> dict:
+    """Graph-level stats for the sampled subgraph (shown in Statistics tab)."""
+    m = ei.shape[1] // 2
+    deg = np.bincount(ei[0], minlength=n).astype(np.int64)
+    density = (2 * m) / (n * (n - 1)) if n > 1 else 0.0
+    # Connected components via networkx (cheap at sample sizes)
+    try:
+        import networkx as nx
+        G = nx.Graph()
+        G.add_nodes_from(range(n))
+        G.add_edges_from(ei.T.tolist())
+        cc = list(nx.connected_components(G))
+        n_cc = len(cc)
+        largest = max(len(c) for c in cc) if cc else 0
+        # sampled clustering
+        sample = min(n, 1000)
+        idx = np.random.default_rng(SEED).choice(n, size=sample, replace=False)
+        avg_clust = float(nx.average_clustering(G, nodes=idx.tolist()))
+    except Exception:
+        n_cc, largest, avg_clust = 0, 0, 0.0
+    n_iso = int((deg == 0).sum())
+    n_classes = int(len(np.unique(labels)))
+    n_comms = int(len(np.unique(communities)))
+    return {
+        "nodes": int(n),
+        "edges": int(m),
+        "density": float(density),
+        "degree_mean": float(deg.mean()) if n else 0.0,
+        "degree_median": float(np.median(deg)) if n else 0.0,
+        "degree_max": int(deg.max()) if n else 0,
+        "isolated_nodes": n_iso,
+        "connected_components": int(n_cc),
+        "largest_cc": int(largest),
+        "largest_cc_fraction": float(largest / n) if n else 0.0,
+        "avg_clustering_sampled": float(avg_clust),
+        f"num_{label_kind}": n_classes,
+        "num_communities": n_comms,
+    }
+
+
 def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
                  layout_name: str, color_by: str, spacing: float = 1.5,
                  progress: Callable[[str], None] = lambda _s: None) -> GraphBundle:
@@ -478,12 +543,17 @@ def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
 
     colors, legend = palette_for(labels)
 
+    progress("computing statistics")
+    stats = compute_stats(sub, n, communities, labels, label_kind)
+
+    src_names = source.get("node_names")
+
     return GraphBundle(
         name=source["name"], domain=source["domain"], split=source["split"],
         full_nodes=full_n, keep_ids=keep, edge_index=sub, labels=labels,
         label_kind=label_kind, coords=coords, dim=dim, colors=colors,
         legend=legend, communities=communities, sample_method=sample_method,
-        layout_name=layout_name,
+        layout_name=layout_name, node_names=src_names, stats=stats,
     )
 
 
@@ -679,9 +749,224 @@ def _make_qt_classes():
             self._content_box.addStretch(1)
 
     # ------------------------------------------------------------------
+    # Stats panel — graph-level statistics (Statistics tab)
+    # ------------------------------------------------------------------
+    class StatsPanel(QtWidgets.QFrame):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("legendPanel")
+            v = QtWidgets.QVBoxLayout(self)
+            v.setContentsMargins(14, 14, 14, 14)
+            v.setSpacing(6)
+            self._container = QtWidgets.QVBoxLayout()
+            self._container.setSpacing(4)
+            inner = QtWidgets.QWidget()
+            inner.setLayout(self._container)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(inner)
+            v.addWidget(scroll, 1)
+
+        def _clear(self):
+            while self._container.count():
+                it = self._container.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.deleteLater()
+
+        def _section(self, title):
+            lab = QtWidgets.QLabel(title)
+            lab.setProperty("role", "section")
+            self._container.addWidget(lab)
+
+        def _pair(self, k, v):
+            line = QtWidgets.QLabel(
+                f"<span style='color:{MUTED}'>{k}</span>  "
+                f"<span style='font-weight:600'>{v}</span>")
+            line.setTextFormat(QtCore.Qt.RichText)
+            self._container.addWidget(line)
+
+        @staticmethod
+        def _fmt(v):
+            if isinstance(v, float):
+                if v == 0:
+                    return "0"
+                if abs(v) < 1e-3:
+                    return f"{v:.2e}"
+                return f"{v:.4f}".rstrip("0").rstrip(".")
+            return f"{v:,}"
+
+        def set_bundle(self, b: GraphBundle):
+            self._clear()
+            self._section("DATASET")
+            self._pair("name", b.name)
+            self._pair("domain", b.domain)
+            self._pair("split", b.split)
+            self._pair("sampled from", f"{b.full_nodes:,} nodes")
+            self._pair("sample method", b.sample_method)
+            self._pair("layout", f"{b.layout_name} · {b.dim}D")
+
+            self._section("STRUCTURE")
+            s = b.stats
+            pretty = {
+                "nodes": "nodes", "edges": "edges",
+                "density": "density",
+                "degree_mean": "degree (mean)",
+                "degree_median": "degree (median)",
+                "degree_max": "degree (max)",
+                "isolated_nodes": "isolated nodes",
+                "connected_components": "components",
+                "largest_cc": "largest component",
+                "largest_cc_fraction": "largest cc / n",
+                "avg_clustering_sampled": "avg clustering (sampled)",
+                "num_communities": "communities (Louvain)",
+            }
+            for key, label in pretty.items():
+                if key in s:
+                    self._pair(label, self._fmt(s[key]))
+
+            self._section(f"LABELS ({b.label_kind})")
+            counts = np.bincount(b.labels.astype(np.int64))
+            for lid in range(len(counts)):
+                if b.label_kind == "class":
+                    nm = class_name(b.name, lid)
+                elif b.label_kind == "community":
+                    nm = f"cluster {lid}"
+                else:
+                    nm = f"bucket {lid}"
+                self._pair(nm, self._fmt(int(counts[lid])))
+            self._container.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # Selected-node panel — updates on click (Selected tab)
+    # ------------------------------------------------------------------
+    class SelectedPanel(QtWidgets.QFrame):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("legendPanel")
+            v = QtWidgets.QVBoxLayout(self)
+            v.setContentsMargins(14, 14, 14, 14)
+            v.setSpacing(6)
+            self._container = QtWidgets.QVBoxLayout()
+            self._container.setSpacing(4)
+            inner = QtWidgets.QWidget()
+            inner.setLayout(self._container)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(inner)
+            v.addWidget(scroll, 1)
+            self._bundle: Optional[GraphBundle] = None
+            self.clear()
+
+        def _reset(self):
+            while self._container.count():
+                it = self._container.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.deleteLater()
+
+        def _section(self, title):
+            lab = QtWidgets.QLabel(title)
+            lab.setProperty("role", "section")
+            self._container.addWidget(lab)
+
+        def _pair(self, k, v):
+            line = QtWidgets.QLabel(
+                f"<span style='color:{MUTED}'>{k}</span>  "
+                f"<span style='font-weight:600'>{v}</span>")
+            line.setTextFormat(QtCore.Qt.RichText)
+            line.setWordWrap(True)
+            self._container.addWidget(line)
+
+        def clear(self):
+            self._reset()
+            hint = QtWidgets.QLabel("Click any node to see its details here.")
+            hint.setProperty("role", "muted")
+            hint.setWordWrap(True)
+            self._container.addWidget(hint)
+            self._container.addStretch(1)
+
+        def set_bundle(self, b: GraphBundle):
+            self._bundle = b
+            self.clear()
+
+        def set_selected(self, i: int):
+            b = self._bundle
+            if b is None:
+                return
+            self._reset()
+            edges = b.edge_index
+            orig_id = int(b.keep_ids[i])
+            deg = int((edges[0] == i).sum())
+            lab = int(b.labels[i])
+            comm = int(b.communities[i])
+            if b.label_kind == "class":
+                lab_txt = class_name(b.name, lab)
+            elif b.label_kind == "community":
+                lab_txt = f"cluster {lab}"
+            else:
+                lab_txt = f"bucket {lab}"
+
+            self._section("NODE")
+            self._pair("name", node_label(b.name, orig_id, b.node_names))
+            self._pair("id (original)", f"{orig_id:,}")
+            self._pair("id (sample)", f"{i:,}")
+            self._pair(b.label_kind, lab_txt)
+            self._pair("community", f"cluster {comm}")
+            self._pair("degree", f"{deg:,}")
+
+            # neighbor list (limit to 20)
+            neigh_idx = edges[1, edges[0] == i]
+            self._section(f"NEIGHBORS ({len(neigh_idx):,})")
+            for j in neigh_idx[:20]:
+                j = int(j)
+                nid = int(b.keep_ids[j])
+                jlab = int(b.labels[j])
+                if b.label_kind == "class":
+                    j_kind = class_name(b.name, jlab)
+                elif b.label_kind == "community":
+                    j_kind = f"cluster {jlab}"
+                else:
+                    j_kind = f"bucket {jlab}"
+                self._pair(
+                    node_label(b.name, nid, b.node_names),
+                    j_kind,
+                )
+            if len(neigh_idx) > 20:
+                more = QtWidgets.QLabel(f"… + {len(neigh_idx) - 20:,} more")
+                more.setProperty("role", "muted")
+                self._container.addWidget(more)
+            self._container.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # InfoPanel — tab container (Legend / Statistics / Selected)
+    # ------------------------------------------------------------------
+    class InfoPanel(QtWidgets.QTabWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setMinimumWidth(260)
+            self.legend = LegendPanel()
+            self.stats = StatsPanel()
+            self.selected = SelectedPanel()
+            self.addTab(self.legend, "Legend")
+            self.addTab(self.stats, "Statistics")
+            self.addTab(self.selected, "Selected")
+
+        def set_bundle(self, b: GraphBundle, label_name_fn):
+            self.legend.set_bundle(b, label_name_fn)
+            self.stats.set_bundle(b)
+            self.selected.set_bundle(b)
+
+        def show_selected(self, i: int):
+            self.selected.set_selected(i)
+            self.setCurrentWidget(self.selected)
+
+    # ------------------------------------------------------------------
     # 2D view
     # ------------------------------------------------------------------
     class GraphView2D(pg.PlotWidget):
+        node_clicked = QtCore.Signal(int)  # emits the bundle-local node index
+
         def __init__(self, parent=None):
             super().__init__(parent=parent)
             self.setBackground(BG_DARK)
@@ -696,6 +981,7 @@ def _make_qt_classes():
             self._edge_intra = None
             self._edge_cross = None
             self._edge_highlight = None
+            self._selection_ring = None
             self._tooltip = pg.TextItem("", color=TEXT, anchor=(0, 1),
                                          fill=pg.mkBrush(22, 28, 36, 230),
                                          border=pg.mkPen(PANEL_BORDER))
@@ -706,6 +992,7 @@ def _make_qt_classes():
             self._static_labels: list[pg.TextItem] = []
 
             self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+            self.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
         def set_bundle(self, b: GraphBundle, node_size: float, edge_width: float,
                        edge_alpha: float, show_labels: bool):
@@ -747,13 +1034,30 @@ def _make_qt_classes():
             self._static_labels = []
             if show_labels and len(coords) <= 200:
                 for i, kid in enumerate(b.keep_ids):
-                    t = pg.TextItem(text=str(int(kid)), color=MUTED,
-                                    anchor=(0.5, -0.5))
+                    t = pg.TextItem(
+                        text=node_label(b.name, int(kid), b.node_names),
+                        color=MUTED, anchor=(0.5, -0.5),
+                    )
                     t.setPos(coords[i, 0], coords[i, 1])
                     self.addItem(t)
                     self._static_labels.append(t)
 
-            self.autoRange(padding=0.05)
+            # selection ring (drawn on click; starts empty)
+            self._selection_ring = pg.ScatterPlotItem(
+                pos=np.zeros((0, 2)), size=24, symbol="o",
+                pen=pg.mkPen(NODE_HIGHLIGHT, width=2.5),
+                brush=pg.mkBrush(0, 0, 0, 0),
+            )
+            self._selection_ring.setZValue(400)
+            self.addItem(self._selection_ring)
+
+            # Fit view to spacing (1.1x padding); spacing actually changes
+            # the visible spread now because autoRange used to re-normalize.
+            r = float(np.max(np.abs(coords))) if len(coords) else 1.0
+            self.getPlotItem().getViewBox().setRange(
+                xRange=(-r * 1.1, r * 1.1), yRange=(-r * 1.1, r * 1.1),
+                padding=0,
+            )
 
         def _add_edges(self, coords, edges, color_hex, width, alpha):
             if edges.size == 0:
@@ -812,8 +1116,9 @@ def _make_qt_classes():
                 label_txt = f"cluster {label_val}"
             else:
                 label_txt = f"bucket {label_val}"
+            name_txt = node_label(b.name, int(b.keep_ids[i]), b.node_names)
             lines = [
-                f"<b>node {int(b.keep_ids[i])}</b>",
+                f"<b>{name_txt}</b>",
                 f"{b.label_kind}: {label_txt}",
                 f"degree: {deg}",
                 f"community: {int(b.communities[i])}",
@@ -862,9 +1167,11 @@ def _make_qt_classes():
                 nu, nv = class_name(b.name, lu), class_name(b.name, lv)
             else:
                 nu, nv = f"{lu}", f"{lv}"
+            un = node_label(b.name, int(b.keep_ids[u]), b.node_names)
+            vn = node_label(b.name, int(b.keep_ids[v]), b.node_names)
             lines = [
                 f"<b>edge</b>",
-                f"{int(b.keep_ids[u])} → {int(b.keep_ids[v])}",
+                f"{un} → {vn}",
                 f"{kind}-{b.label_kind}  ({nu} ↔ {nv})",
             ]
             self._tooltip.setHtml("<br>".join(lines))
@@ -875,10 +1182,39 @@ def _make_qt_classes():
             y = [b.coords[u, 1], b.coords[v, 1]]
             self._edge_highlight.setData(x, y)
 
+        # -------- click --------
+        def _on_mouse_clicked(self, ev):
+            if self._bundle is None:
+                return
+            # Only act on single left-clicks
+            try:
+                if ev.button() != QtCore.Qt.LeftButton:
+                    return
+                if hasattr(ev, "double") and ev.double():
+                    return
+            except Exception:
+                pass
+            vb = self.getPlotItem().getViewBox()
+            mouse_point = vb.mapSceneToView(ev.scenePos())
+            mx, my = mouse_point.x(), mouse_point.y()
+            coords = self._bundle.coords
+            diffs = coords - np.array([mx, my])
+            dists = np.linalg.norm(diffs, axis=1)
+            pix = vb.viewPixelSize()
+            px_thresh = 16 * max(pix[0], pix[1])
+            i = int(np.argmin(dists))
+            if dists[i] < px_thresh:
+                self._selection_ring.setData(
+                    pos=np.array([[coords[i, 0], coords[i, 1]]])
+                )
+                self.node_clicked.emit(i)
+
     # ------------------------------------------------------------------
     # 3D view
     # ------------------------------------------------------------------
     class GraphView3D(gl.GLViewWidget):
+        node_clicked = QtCore.Signal(int)
+
         def __init__(self, parent=None):
             super().__init__(parent=parent)
             self.setBackgroundColor(pg.mkColor(BG_DARK))
@@ -892,6 +1228,8 @@ def _make_qt_classes():
             self._edge_cross = None
             self._edge_highlight = None
             self._label_items: list = []
+            self._press_pos: Optional[tuple[float, float]] = None
+            self._selection_marker = None
 
             self._tooltip = QtWidgets.QLabel("", self)
             self._tooltip.setStyleSheet(
@@ -917,10 +1255,10 @@ def _make_qt_classes():
             labels = b.labels
             intra_mask = labels[edges[0]] == labels[edges[1]]
 
-            # scale coords into a reasonable viewing cube
-            span = coords.max(axis=0) - coords.min(axis=0)
-            scale = 10.0 / max(float(span.max()), 1e-6)
-            coords = (coords - coords.mean(axis=0)) * scale
+            # DO NOT re-normalize coords here — doing so cancels the user's
+            # spacing slider. The layouts already scale coords by `spacing`
+            # into [-spacing, spacing]. We just center them at origin.
+            coords = coords - coords.mean(axis=0)
             b.coords = coords  # keep in sync for hover projection
 
             self._add_edges(coords, edges[:, intra_mask], EDGE_INTRA,
@@ -939,15 +1277,20 @@ def _make_qt_classes():
             if show_labels and len(coords) <= 150 and hasattr(gl, "GLTextItem"):
                 for i, kid in enumerate(b.keep_ids):
                     try:
-                        t = gl.GLTextItem(pos=coords[i], text=str(int(kid)),
-                                           color=(200, 210, 220, 200))
+                        t = gl.GLTextItem(
+                            pos=coords[i],
+                            text=node_label(b.name, int(kid), b.node_names),
+                            color=(200, 210, 220, 200),
+                        )
                         self.addItem(t)
                         self._label_items.append(t)
                     except Exception:
                         break
 
-            radius = float(np.linalg.norm(coords.max(axis=0) - coords.min(axis=0)))
-            self.opts["distance"] = max(radius * 1.5, 4.0)
+            # Camera distance: fit a unit graph snugly; spacing pushes nodes
+            # out beyond that and the user sees them genuinely more spread.
+            self.opts["distance"] = 4.0
+            self.opts["fov"] = 50
             self.update()
 
         def _add_edges(self, coords, edges, color_hex, width, alpha, kind):
@@ -1030,8 +1373,9 @@ def _make_qt_classes():
                     label_txt = f"cluster {label_val}"
                 else:
                     label_txt = f"bucket {label_val}"
+                name_txt = node_label(b.name, int(b.keep_ids[i]), b.node_names)
                 self._tooltip.setText(
-                    f"node {int(b.keep_ids[i])}\n"
+                    f"{name_txt}\n"
                     f"{b.label_kind}: {label_txt}\n"
                     f"community: {int(b.communities[i])}\n"
                     f"degree: {deg}"
@@ -1069,6 +1413,52 @@ def _make_qt_classes():
         def leaveEvent(self, ev):
             super().leaveEvent(ev)
             self._tooltip.hide()
+
+        # -------- click selection (distinct from camera drag) --------
+        def mousePressEvent(self, ev):
+            super().mousePressEvent(ev)
+            pos = ev.position() if hasattr(ev, "position") else ev.localPos()
+            self._press_pos = (float(pos.x()), float(pos.y()))
+
+        def mouseReleaseEvent(self, ev):
+            super().mouseReleaseEvent(ev)
+            pos = ev.position() if hasattr(ev, "position") else ev.localPos()
+            x, y = float(pos.x()), float(pos.y())
+            if self._press_pos is not None:
+                dx, dy = x - self._press_pos[0], y - self._press_pos[1]
+                moved = (dx * dx + dy * dy) ** 0.5
+            else:
+                moved = 999
+            self._press_pos = None
+            if moved > 4.0 or self._bundle is None or self._scatter is None:
+                return
+            try:
+                if ev.button() != QtCore.Qt.LeftButton:
+                    return
+            except Exception:
+                pass
+            screen = self._project(self._bundle.coords)
+            dists = np.hypot(screen[:, 0] - x, screen[:, 1] - y)
+            i = int(np.argmin(dists))
+            if dists[i] < 20.0:
+                self._show_selection(i)
+                self.node_clicked.emit(i)
+
+        def _show_selection(self, i: int):
+            # replace the previous marker with a single larger dot
+            if self._selection_marker is not None:
+                try:
+                    self.removeItem(self._selection_marker)
+                except Exception:
+                    pass
+            b = self._bundle
+            pos_arr = np.array([b.coords[i]], dtype=np.float32)
+            self._selection_marker = gl.GLScatterPlotItem(
+                pos=pos_arr, size=20.0,
+                color=(1.0, 0.7, 0.3, 1.0), pxMode=True,
+            )
+            self._selection_marker.setGLOptions("translucent")
+            self.addItem(self._selection_marker)
 
     # ------------------------------------------------------------------
     # Sidebar
@@ -1152,9 +1542,9 @@ def _make_qt_classes():
             root.addWidget(QtWidgets.QLabel("Sample size"))
             root.addWidget(self.sample_spin)
 
-            # layout spacing — spreads nodes further apart
+            # layout spacing — spreads nodes further apart (slider / 10 = factor)
             self.spacing_slider = self._make_slider(
-                5, 80, 15, "Node spacing  (x0.1)",
+                5, 150, 20, "Node spacing  (x0.1)",
             )
             root.addWidget(self.spacing_slider[0])
 
@@ -1293,10 +1683,10 @@ def _make_qt_classes():
             self.graph_layout.addWidget(self.placeholder)
             splitter.addWidget(self.graph_container)
 
-            self.legend = LegendPanel()
-            splitter.addWidget(self.legend)
+            self.info_panel = InfoPanel()
+            splitter.addWidget(self.info_panel)
 
-            splitter.setSizes([340, 940, 240])
+            splitter.setSizes([340, 900, 300])
             splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
             splitter.setStretchFactor(2, 0)
@@ -1346,8 +1736,9 @@ def _make_qt_classes():
                     edge_alpha=opts["edge_alpha"],
                     show_labels=opts["show_labels"],
                 )
+                view.node_clicked.connect(self.info_panel.show_selected)
                 self._swap_view(view)
-                self.legend.set_bundle(bundle, self._label_name)
+                self.info_panel.set_bundle(bundle, self._label_name)
 
                 self.sidebar.set_busy(
                     False, f"rendered {len(bundle.keep_ids):,} nodes · "
@@ -1366,6 +1757,9 @@ def _make_qt_classes():
 
     return {
         "LegendPanel": LegendPanel,
+        "StatsPanel": StatsPanel,
+        "SelectedPanel": SelectedPanel,
+        "InfoPanel": InfoPanel,
         "GraphView2D": GraphView2D,
         "GraphView3D": GraphView3D,
         "Sidebar": Sidebar,
