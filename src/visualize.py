@@ -49,6 +49,30 @@ NODE_HIGHLIGHT = "#f0ad4e"
 
 
 # ---------------------------------------------------------------------------
+# Known class-name registries (so tooltips/legends show real names)
+# ---------------------------------------------------------------------------
+
+CLASS_NAMES: dict[str, list[str]] = {
+    "cora": [
+        "Case_Based", "Genetic_Algorithms", "Neural_Networks",
+        "Probabilistic_Methods", "Reinforcement_Learning",
+        "Rule_Learning", "Theory",
+    ],
+    "citeseer": ["Agents", "AI", "DB", "IR", "ML", "HCI"],
+    "pubmed": [
+        "Diabetes_Experimental", "Diabetes_Type1", "Diabetes_Type2",
+    ],
+}
+
+
+def class_name(dataset: str, class_id: int) -> str:
+    names = CLASS_NAMES.get(dataset)
+    if names and 0 <= class_id < len(names):
+        return names[class_id]
+    return f"class {class_id}"
+
+
+# ---------------------------------------------------------------------------
 # Dataset container
 # ---------------------------------------------------------------------------
 
@@ -226,14 +250,25 @@ def _nx_graph(ei: np.ndarray, n: int):
     return G
 
 
-def layout_spring(ei, n, dim, **_):
+def _normalize(coords: np.ndarray) -> np.ndarray:
+    coords = coords - coords.mean(axis=0)
+    span = np.max(np.abs(coords))
+    if span > 1e-9:
+        coords = coords / span
+    return coords.astype(np.float32)
+
+
+def layout_spring(ei, n, dim, spacing=1.0, **_):
     import networkx as nx
     G = _nx_graph(ei, n)
-    pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=100)
-    return np.array([pos[i] for i in range(n)], dtype=np.float32)
+    # higher k = stronger repulsion = more inter-node space
+    k = spacing * 1.0 / max(np.sqrt(n), 1.0)
+    pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=120, k=k)
+    coords = np.array([pos[i] for i in range(n)], dtype=np.float32)
+    return _normalize(coords) * spacing
 
 
-def layout_kamada_kawai(ei, n, dim, **_):
+def layout_kamada_kawai(ei, n, dim, spacing=1.0, **_):
     import networkx as nx
     G = _nx_graph(ei, n)
     try:
@@ -242,13 +277,13 @@ def layout_kamada_kawai(ei, n, dim, **_):
         if dim == 2:
             pos = nx.kamada_kawai_layout(G)
         else:
-            # networkx pre-3.0 doesn't accept dim > 2 here
             p2 = nx.kamada_kawai_layout(G)
             pos = {k: np.array([v[0], v[1], 0.0]) for k, v in p2.items()}
-    return np.array([pos[i] for i in range(n)], dtype=np.float32)
+    coords = np.array([pos[i] for i in range(n)], dtype=np.float32)
+    return _normalize(coords) * spacing
 
 
-def layout_spectral(ei, n, dim, **_):
+def layout_spectral(ei, n, dim, spacing=1.0, **_):
     from scipy.sparse import csr_matrix, diags, eye
     from scipy.sparse.linalg import eigsh
     row, col = ei[0], ei[1]
@@ -267,31 +302,33 @@ def layout_spectral(ei, n, dim, **_):
     coords = vecs[:, 1:dim + 1]
     if coords.shape[1] < dim:
         coords = np.hstack([coords, np.zeros((n, dim - coords.shape[1]))])
-    coords = (coords - coords.mean(axis=0)) / (coords.std(axis=0) + 1e-9)
-    return coords.astype(np.float32)
+    return _normalize(coords) * spacing
 
 
-def layout_circular(ei, n, dim, **_):
+def layout_circular(ei, n, dim, spacing=1.0, **_):
     if dim == 2:
         t = np.linspace(0, 2 * np.pi, n, endpoint=False)
-        return np.stack([np.cos(t), np.sin(t)], axis=1).astype(np.float32)
-    # 3D → Fibonacci sphere
-    i = np.arange(n, dtype=np.float64)
-    if n == 1:
-        return np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
-    phi = np.pi * (3.0 - np.sqrt(5))
-    y = 1 - (i / (n - 1)) * 2
-    r = np.sqrt(np.maximum(0.0, 1 - y * y))
-    theta = phi * i
-    return np.stack([np.cos(theta) * r, y, np.sin(theta) * r], axis=1).astype(np.float32)
+        coords = np.stack([np.cos(t), np.sin(t)], axis=1).astype(np.float32)
+    elif n == 1:
+        coords = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    else:
+        # Fibonacci sphere
+        i = np.arange(n, dtype=np.float64)
+        phi = np.pi * (3.0 - np.sqrt(5))
+        y = 1 - (i / (n - 1)) * 2
+        r = np.sqrt(np.maximum(0.0, 1 - y * y))
+        theta = phi * i
+        coords = np.stack([np.cos(theta) * r, y, np.sin(theta) * r], axis=1).astype(np.float32)
+    return coords * spacing
 
 
-def layout_community(ei, n, dim, communities=None, **_):
+def layout_community(ei, n, dim, communities=None, spacing=1.0, **_):
     import networkx as nx
     if communities is None:
         communities = detect_communities(ei, n)
     n_comms = int(communities.max()) + 1
-    centers = layout_circular(None, n_comms, dim) * 5.0
+    # spacing scales only the inter-cluster radius; intra-cluster stays ~1
+    centers = layout_circular(None, n_comms, dim, spacing=1.0) * (3.0 + 2.0 * spacing)
     coords = np.zeros((n, dim), dtype=np.float32)
     for c in range(n_comms):
         nodes_c = np.where(communities == c)[0]
@@ -310,11 +347,11 @@ def layout_community(ei, n, dim, communities=None, **_):
             G = nx.Graph()
             G.add_nodes_from(range(len(nodes_c)))
             G.add_edges_from(local_ei_remapped.T.tolist())
-            pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=40, scale=1.0)
+            pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=50, scale=1.0)
             local_pos = np.array([pos[i] for i in range(len(nodes_c))],
                                   dtype=np.float32)
         coords[nodes_c] = centers[c] + local_pos
-    return coords
+    return coords.astype(np.float32)
 
 
 LAYOUTS: dict[str, Callable] = {
@@ -388,12 +425,14 @@ def load_custom_file(path: str):
 # Pipeline
 # ---------------------------------------------------------------------------
 
-def _cache_path(name: str, layout: str, method: str, size: int, dim: int) -> Path:
-    return LAYOUT_CACHE / f"{name}_{layout}_{method}_n{size}_d{dim}.npz"
+def _cache_path(name: str, layout: str, method: str, size: int, dim: int,
+                spacing: float) -> Path:
+    s = f"{spacing:.2f}".replace(".", "p")
+    return LAYOUT_CACHE / f"{name}_{layout}_{method}_n{size}_d{dim}_s{s}.npz"
 
 
 def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
-                 layout_name: str, color_by: str,
+                 layout_name: str, color_by: str, spacing: float = 1.5,
                  progress: Callable[[str], None] = lambda _s: None) -> GraphBundle:
     progress("sampling")
     rng = np.random.default_rng(SEED)
@@ -412,13 +451,14 @@ def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
     progress("community detection")
     communities = detect_communities(sub, n)
 
-    cache = _cache_path(source["name"], layout_name, sample_method, n, dim)
+    cache = _cache_path(source["name"], layout_name, sample_method, n, dim, spacing)
     if cache.exists():
         progress("loading cached layout")
         coords = np.load(cache)["coords"]
     else:
         progress(f"computing {layout_name} layout")
-        coords = LAYOUTS[layout_name](sub, n, dim, communities=communities)
+        coords = LAYOUTS[layout_name](sub, n, dim, communities=communities,
+                                       spacing=spacing)
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache, coords=coords)
 
@@ -622,9 +662,12 @@ def _make_qt_classes():
                 ("dim", f"{b.dim}D"),
             ])
             self._section(f"NODES BY {b.label_kind.upper()}")
+            counts = np.bincount(b.labels.astype(np.int64))
             for label_id, hx in b.legend[:30]:
-                txt = label_name_fn(int(label_id), b.label_kind)
-                self._row(hx, txt)
+                lid = int(label_id)
+                txt = label_name_fn(lid, b.label_kind, b.name)
+                note = f"{int(counts[lid]):,}" if lid < len(counts) else ""
+                self._row(hx, txt, note)
             if len(b.legend) > 30:
                 more = QtWidgets.QLabel(f"+ {len(b.legend) - 30} more")
                 more.setProperty("role", "muted")
@@ -761,11 +804,17 @@ def _make_qt_classes():
         def _show_node_tooltip(self, i, mx, my):
             b = self._bundle
             edges = b.edge_index
-            deg = int(((edges[0] == i) | (edges[1] == i)).sum() / 2 * 2)
             deg = int((edges[0] == i).sum())
+            label_val = int(b.labels[i])
+            if b.label_kind == "class":
+                label_txt = class_name(b.name, label_val)
+            elif b.label_kind == "community":
+                label_txt = f"cluster {label_val}"
+            else:
+                label_txt = f"bucket {label_val}"
             lines = [
                 f"<b>node {int(b.keep_ids[i])}</b>",
-                f"{b.label_kind}: {int(b.labels[i])}",
+                f"{b.label_kind}: {label_txt}",
                 f"degree: {deg}",
                 f"community: {int(b.communities[i])}",
             ]
@@ -809,10 +858,14 @@ def _make_qt_classes():
             u, v = int(b.edge_index[0, edge_i]), int(b.edge_index[1, edge_i])
             lu, lv = int(b.labels[u]), int(b.labels[v])
             kind = "intra" if lu == lv else "cross"
+            if b.label_kind == "class":
+                nu, nv = class_name(b.name, lu), class_name(b.name, lv)
+            else:
+                nu, nv = f"{lu}", f"{lv}"
             lines = [
                 f"<b>edge</b>",
                 f"{int(b.keep_ids[u])} → {int(b.keep_ids[v])}",
-                f"{kind}-{b.label_kind}  ({lu} ↔ {lv})",
+                f"{kind}-{b.label_kind}  ({nu} ↔ {nv})",
             ]
             self._tooltip.setHtml("<br>".join(lines))
             self._tooltip.setPos(mx, my)
@@ -830,6 +883,9 @@ def _make_qt_classes():
             super().__init__(parent=parent)
             self.setBackgroundColor(pg.mkColor(BG_DARK))
             self.setMouseTracking(True)
+            # Ensure Qt delivers hover events even with no mouse button pressed
+            # (mac/Qt6 prefers HoverMove events over mouseMove in that case).
+            self.setAttribute(QtCore.Qt.WA_Hover, True)
             self._bundle: Optional[GraphBundle] = None
             self._scatter = None
             self._edge_intra = None
@@ -914,9 +970,27 @@ def _make_qt_classes():
         # -------- 3D hover via screen-space projection --------
         @staticmethod
         def _qmat_to_np(m) -> np.ndarray:
-            # QMatrix4x4 indexing is m[row, col]; we build a numpy row-major array.
-            return np.array([[m[r, c] for c in range(4)] for r in range(4)],
-                            dtype=np.float64)
+            # Try the fast path first: Qt stores 16 floats column-major.
+            try:
+                data = m.data()
+                arr = np.array(list(data), dtype=np.float64)
+                if arr.size == 16:
+                    return arr.reshape(4, 4, order="F")
+            except Exception:
+                pass
+            # Fallback: element-wise. Some bindings expose (row, col), others
+            # implement __call__(row, col) or a .row()/.column() API.
+            out = np.empty((4, 4), dtype=np.float64)
+            for r in range(4):
+                for c in range(4):
+                    try:
+                        out[r, c] = float(m[r, c])
+                    except Exception:
+                        try:
+                            out[r, c] = float(m(r, c))
+                        except Exception:
+                            out[r, c] = 1.0 if r == c else 0.0
+            return out
 
         def _project(self, pts: np.ndarray) -> np.ndarray:
             try:
@@ -939,34 +1013,58 @@ def _make_qt_classes():
             screen[behind, 0] = np.inf
             return screen
 
-        def mouseMoveEvent(self, ev):
-            super().mouseMoveEvent(ev)
+        def _update_hover(self, cx: float, cy: float):
             if self._bundle is None or self._scatter is None:
                 return
-            pos = ev.position() if hasattr(ev, "position") else ev.localPos()
-            cx, cy = float(pos.x()), float(pos.y())
             screen = self._project(self._bundle.coords)
             dists = np.hypot(screen[:, 0] - cx, screen[:, 1] - cy)
             i = int(np.argmin(dists))
-            if dists[i] < 14.0:
+            if dists[i] < 18.0:
                 b = self._bundle
                 edges = b.edge_index
                 deg = int((edges[0] == i).sum())
-                neighbors = set(edges[1, edges[0] == i].tolist())
+                label_val = int(b.labels[i])
+                if b.label_kind == "class":
+                    label_txt = class_name(b.name, label_val)
+                elif b.label_kind == "community":
+                    label_txt = f"cluster {label_val}"
+                else:
+                    label_txt = f"bucket {label_val}"
                 self._tooltip.setText(
-                    f"id {int(b.keep_ids[i])}\n"
-                    f"{b.label_kind} {int(b.labels[i])}\n"
-                    f"community {int(b.communities[i])}\n"
-                    f"degree {deg}\n"
-                    f"neighbors {min(len(neighbors), 6)}"
-                    + (" …" if len(neighbors) > 6 else "")
+                    f"node {int(b.keep_ids[i])}\n"
+                    f"{b.label_kind}: {label_txt}\n"
+                    f"community: {int(b.communities[i])}\n"
+                    f"degree: {deg}"
                 )
                 self._tooltip.adjustSize()
-                self._tooltip.move(int(cx + 14), int(cy + 14))
+                tx = int(min(cx + 14, self.width() - self._tooltip.width() - 4))
+                ty = int(min(cy + 14, self.height() - self._tooltip.height() - 4))
+                self._tooltip.move(max(tx, 0), max(ty, 0))
                 self._tooltip.raise_()
                 self._tooltip.show()
             else:
                 self._tooltip.hide()
+
+        def mouseMoveEvent(self, ev):
+            super().mouseMoveEvent(ev)
+            pos = ev.position() if hasattr(ev, "position") else ev.localPos()
+            self._update_hover(float(pos.x()), float(pos.y()))
+
+        def hoverMoveEvent(self, ev):
+            # Covers macOS where mouseMoveEvent may not fire without a button.
+            try:
+                super().hoverMoveEvent(ev)
+            except AttributeError:
+                pass
+            pos = ev.position() if hasattr(ev, "position") else ev.pos()
+            self._update_hover(float(pos.x()), float(pos.y()))
+
+        def event(self, ev):
+            # Qt6 hover events arrive as QHoverMove on the widget itself.
+            if ev.type() == QtCore.QEvent.HoverMove:
+                pos = ev.position() if hasattr(ev, "position") else ev.pos()
+                self._update_hover(float(pos.x()), float(pos.y()))
+            return super().event(ev)
 
         def leaveEvent(self, ev):
             super().leaveEvent(ev)
@@ -1053,6 +1151,12 @@ def _make_qt_classes():
             self.sample_spin.setValue(DEFAULT_SAMPLE)
             root.addWidget(QtWidgets.QLabel("Sample size"))
             root.addWidget(self.sample_spin)
+
+            # layout spacing — spreads nodes further apart
+            self.spacing_slider = self._make_slider(
+                5, 80, 15, "Node spacing  (x0.1)",
+            )
+            root.addWidget(self.spacing_slider[0])
 
             # appearance
             root.addWidget(self._section("APPEARANCE"))
@@ -1148,6 +1252,7 @@ def _make_qt_classes():
                 "color_by": self.color_combo.currentText(),
                 "sample_method": self.sample_combo.currentText(),
                 "sample_size": self.sample_spin.value(),
+                "spacing": self.spacing_slider[1].value() / 10.0,
                 "node_size": self.node_slider[1].value(),
                 "edge_width": self.edge_slider[1].value(),
                 "edge_alpha": self.alpha_slider[1].value(),
@@ -1230,7 +1335,7 @@ def _make_qt_classes():
                 bundle = build_bundle(
                     source, opts["dim"], opts["sample_method"],
                     opts["sample_size"], opts["layout"], opts["color_by"],
-                    progress=prog,
+                    spacing=opts["spacing"], progress=prog,
                 )
 
                 view = GraphView2D() if opts["dim"] == 2 else GraphView3D()
@@ -1252,10 +1357,12 @@ def _make_qt_classes():
                 traceback.print_exc()
                 self.sidebar.set_busy(False, f"⚠ {type(ex).__name__}: {ex}")
 
-        def _label_name(self, label_id: int, kind: str) -> str:
-            if kind == "degree":
-                return f"bucket {label_id}"
-            return f"{kind} {label_id}"
+        def _label_name(self, label_id: int, kind: str, dataset: str) -> str:
+            if kind == "class":
+                return class_name(dataset, int(label_id))
+            if kind == "community":
+                return f"cluster {int(label_id)}"
+            return f"bucket {int(label_id)}"
 
     return {
         "LegendPanel": LegendPanel,
