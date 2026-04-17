@@ -81,6 +81,20 @@ NODE_TYPE: dict[str, str] = {
 }
 
 
+# Per-dataset edge relation. All of these are single-relation graphs in the
+# public distributions we load, so each dataset has one semantic edge type.
+EDGE_TYPE: dict[str, str] = {
+    "cora": "cites", "citeseer": "cites", "pubmed": "cites",
+    "ogbn_arxiv": "cites", "ogbn_mag": "cites",
+    "ppi": "interacts_with", "ogbn_proteins": "interacts_with",
+    "facebook_ego": "friends_with", "twitch_en": "mutual_follow",
+    "lastfm_asia": "friends_with",
+    "coauthor_cs": "coauthored_with", "dblp_snap": "coauthored_with",
+    "power_grid": "connected_to", "as733": "peers_with",
+    "euro_road": "road_to",
+}
+
+
 def class_name(dataset: str, class_id: int) -> str:
     names = CLASS_NAMES.get(dataset)
     if names and 0 <= class_id < len(names):
@@ -95,6 +109,34 @@ def node_label(dataset: str, original_id: int, names: Optional[list] = None) -> 
         return str(names[original_id])
     noun = NODE_TYPE.get(dataset, "node")
     return f"{noun} {int(original_id)}"
+
+
+def edge_relation(dataset: str) -> str:
+    return EDGE_TYPE.get(dataset, "connects_to")
+
+
+def community_label(dataset: str, comm_id: int, class_labels: Optional[np.ndarray],
+                     communities: np.ndarray) -> str:
+    """Name a community by its dominant class when class labels are available:
+    e.g. 'cluster 3 · Neural_Networks (72%)'. Falls back to 'cluster N' otherwise."""
+    if class_labels is None:
+        return f"cluster {int(comm_id)}"
+    mask = communities == comm_id
+    if not mask.any():
+        return f"cluster {int(comm_id)}"
+    within = class_labels[mask]
+    within = within[within >= 0]
+    if len(within) == 0:
+        return f"cluster {int(comm_id)}"
+    counts = np.bincount(within)
+    top = int(np.argmax(counts))
+    frac = counts[top] / len(within)
+    nm = class_name(dataset, top)
+    if frac >= 0.5:
+        return f"cluster {int(comm_id)} · {nm} ({int(frac * 100)}%)"
+    if frac >= 0.3:
+        return f"cluster {int(comm_id)} · mostly {nm}"
+    return f"cluster {int(comm_id)} · mixed"
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +163,7 @@ class GraphBundle:
     layout_name: str
     node_names: Optional[list] = None  # optional human-readable node names
     stats: dict = field(default_factory=dict)
+    class_labels: Optional[np.ndarray] = None  # original class labels, if shipped
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +631,12 @@ def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
 
     # node labels
     src_labels = source.get("labels")
-    if color_by == "class" and src_labels is not None and src_labels.ndim == 1:
-        labels = src_labels[keep].astype(np.int64)
+    class_labels: Optional[np.ndarray] = None
+    if src_labels is not None and src_labels.ndim == 1:
+        class_labels = src_labels[keep].astype(np.int64)
+
+    if color_by == "class" and class_labels is not None:
+        labels = class_labels
         label_kind = "class"
     elif color_by == "degree":
         deg = np.bincount(sub[0], minlength=n)
@@ -613,6 +660,7 @@ def build_bundle(source: dict, dim: int, sample_method: str, sample_size: int,
         label_kind=label_kind, coords=coords, dim=dim, colors=colors,
         legend=legend, communities=communities, sample_method=sample_method,
         layout_name=layout_name, node_names=src_names, stats=stats,
+        class_labels=class_labels,
     )
 
 
@@ -878,16 +926,21 @@ def _make_qt_classes():
             counts = np.bincount(b.labels.astype(np.int64))
             for label_id, hx in b.legend[:30]:
                 lid = int(label_id)
-                txt = label_name_fn(lid, b.label_kind, b.name)
+                if b.label_kind == "community":
+                    txt = community_label(b.name, lid,
+                                           b.class_labels, b.communities)
+                else:
+                    txt = label_name_fn(lid, b.label_kind, b.name)
                 note = f"{int(counts[lid]):,}" if lid < len(counts) else ""
                 self._row(hx, txt, note)
             if len(b.legend) > 30:
                 more = QtWidgets.QLabel(f"+ {len(b.legend) - 30} more")
                 more.setProperty("role", "muted")
                 self._content_box.addWidget(more)
-            self._section("EDGES")
-            self._row(EDGE_INTRA, f"intra-{b.label_kind}")
-            self._row(EDGE_CROSS, f"cross-{b.label_kind}")
+            rel = edge_relation(b.name)
+            self._section(f"EDGES · {rel.upper()}")
+            self._row(EDGE_INTRA, f"{rel} (intra-{b.label_kind})")
+            self._row(EDGE_CROSS, f"{rel} (cross-{b.label_kind})")
             self._row(EDGE_HIGHLIGHT, "highlighted (hover)")
             self._content_box.addStretch(1)
 
@@ -1081,15 +1134,20 @@ def _make_qt_classes():
             # --- Label distribution bars ---
             counts = np.bincount(b.labels.astype(np.int64))
             legend_colors = [hx for _, hx in b.legend]
-            labels_text = []
+            short, long = [], []
             for lid in range(len(counts)):
                 if b.label_kind == "class":
                     nm = class_name(b.name, lid)
+                    short.append(nm[:12])
+                    long.append(nm)
                 elif b.label_kind == "community":
-                    nm = f"c{lid}"
+                    full = community_label(b.name, lid,
+                                            b.class_labels, b.communities)
+                    short.append(f"c{lid}")
+                    long.append(full)
                 else:
-                    nm = f"b{lid}"
-                labels_text.append(nm[:10])
+                    short.append(f"b{lid}")
+                    long.append(f"bucket {lid}")
             # sort bars by count desc for easier reading when many communities
             order = np.argsort(-counts)
             show = order[:min(15, len(order))]
@@ -1100,8 +1158,20 @@ def _make_qt_classes():
                 counts[show],
                 colors=[legend_colors[i] if i < len(legend_colors) else ACCENT
                         for i in show],
-                labels=[labels_text[i] for i in show],
+                labels=[short[i] for i in show],
             )
+            # annotated rows under the chart so users can see the full
+            # "cluster N · Neural_Networks (72%)" name beside the short tick.
+            for i in show:
+                line = QtWidgets.QLabel(
+                    f"<span style='color:{legend_colors[i] if i < len(legend_colors) else TEXT}'>"
+                    f"■</span>  "
+                    f"<span style='color:{TEXT}'>{long[i]}</span>  "
+                    f"<span style='color:{MUTED}'>— {int(counts[i]):,}</span>"
+                )
+                line.setTextFormat(QtCore.Qt.RichText)
+                line.setWordWrap(True)
+                self._container.addWidget(line)
 
             # --- Connectivity tile row ---
             self._section("CONNECTIVITY")
@@ -1209,9 +1279,13 @@ def _make_qt_classes():
             if b.label_kind == "class":
                 lab_txt = class_name(b.name, lab)
             elif b.label_kind == "community":
-                lab_txt = f"cluster {lab}"
+                lab_txt = community_label(b.name, lab,
+                                           b.class_labels, b.communities)
             else:
                 lab_txt = f"bucket {lab}"
+            comm_txt = community_label(b.name, comm,
+                                        b.class_labels, b.communities)
+            rel = edge_relation(b.name)
 
             self._section("NODE")
             self._pair("name", node_label(b.name, orig_id, b.node_names))
@@ -1228,12 +1302,16 @@ def _make_qt_classes():
             self._pair("id (original)", f"{orig_id:,}")
             self._pair("id (sample)", f"{i:,}")
             self._pair(b.label_kind, lab_txt)
-            self._pair("community", f"cluster {comm}")
-            self._pair("degree", f"{deg:,}")
+            # class always shown if it's available (even when coloring by
+            # community, it's useful context)
+            if b.class_labels is not None and b.label_kind != "class":
+                self._pair("class", class_name(b.name, int(b.class_labels[i])))
+            self._pair("community", comm_txt)
+            self._pair("degree", f"{deg:,} × {rel}")
 
             # neighbor list (limit to 20)
             neigh_idx = edges[1, edges[0] == i]
-            self._section(f"NEIGHBORS ({len(neigh_idx):,})")
+            self._section(f"NEIGHBORS — {rel.upper()} ({len(neigh_idx):,})")
             for j in neigh_idx[:20]:
                 j = int(j)
                 nid = int(b.keep_ids[j])
@@ -1241,7 +1319,8 @@ def _make_qt_classes():
                 if b.label_kind == "class":
                     j_kind = class_name(b.name, jlab)
                 elif b.label_kind == "community":
-                    j_kind = f"cluster {jlab}"
+                    j_kind = community_label(b.name, jlab,
+                                              b.class_labels, b.communities)
                 else:
                     j_kind = f"bucket {jlab}"
                 self._pair(
@@ -1429,15 +1508,18 @@ def _make_qt_classes():
             if b.label_kind == "class":
                 label_txt = class_name(b.name, label_val)
             elif b.label_kind == "community":
-                label_txt = f"cluster {label_val}"
+                label_txt = community_label(b.name, label_val,
+                                             b.class_labels, b.communities)
             else:
                 label_txt = f"bucket {label_val}"
             name_txt = node_label(b.name, int(b.keep_ids[i]), b.node_names)
+            comm_txt = community_label(
+                b.name, int(b.communities[i]), b.class_labels, b.communities)
             lines = [
                 f"<b>{name_txt}</b>",
                 f"{b.label_kind}: {label_txt}",
-                f"degree: {deg}",
-                f"community: {int(b.communities[i])}",
+                f"degree: {deg} × {edge_relation(b.name)}",
+                f"community: {comm_txt}",
             ]
             self._tooltip.setHtml("<br>".join(lines))
             self._tooltip.setPos(mx, my)
@@ -1481,12 +1563,16 @@ def _make_qt_classes():
             kind = "intra" if lu == lv else "cross"
             if b.label_kind == "class":
                 nu, nv = class_name(b.name, lu), class_name(b.name, lv)
+            elif b.label_kind == "community":
+                nu = community_label(b.name, lu, b.class_labels, b.communities)
+                nv = community_label(b.name, lv, b.class_labels, b.communities)
             else:
                 nu, nv = f"{lu}", f"{lv}"
             un = node_label(b.name, int(b.keep_ids[u]), b.node_names)
             vn = node_label(b.name, int(b.keep_ids[v]), b.node_names)
+            rel = edge_relation(b.name)
             lines = [
-                f"<b>edge</b>",
+                f"<b>{rel}</b>",
                 f"{un} → {vn}",
                 f"{kind}-{b.label_kind}  ({nu} ↔ {nv})",
             ]
@@ -1686,15 +1772,19 @@ def _make_qt_classes():
                 if b.label_kind == "class":
                     label_txt = class_name(b.name, label_val)
                 elif b.label_kind == "community":
-                    label_txt = f"cluster {label_val}"
+                    label_txt = community_label(b.name, label_val,
+                                                 b.class_labels, b.communities)
                 else:
                     label_txt = f"bucket {label_val}"
                 name_txt = node_label(b.name, int(b.keep_ids[i]), b.node_names)
+                comm_txt = community_label(
+                    b.name, int(b.communities[i]),
+                    b.class_labels, b.communities)
                 self._tooltip.setText(
                     f"{name_txt}\n"
                     f"{b.label_kind}: {label_txt}\n"
-                    f"community: {int(b.communities[i])}\n"
-                    f"degree: {deg}"
+                    f"community: {comm_txt}\n"
+                    f"degree: {deg} × {edge_relation(b.name)}"
                 )
                 self._tooltip.adjustSize()
                 tx = int(min(cx + 14, self.width() - self._tooltip.width() - 4))
