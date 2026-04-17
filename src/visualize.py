@@ -35,17 +35,20 @@ PALETTE = [
     "#d35400", "#2980b9", "#7f8c8d", "#bdc3c7", "#f8c471",
 ]
 
-BG_DARK = "#0f1419"
-PANEL_BG = "#161c24"
-PANEL_BORDER = "#2a3440"
-TEXT = "#e6ecef"
-MUTED = "#8894a0"
-ACCENT = "#5bc0de"
+BG_DARK = "#07080c"
+PANEL_BG = "#0d1017"
+PANEL_BORDER = "#232b38"
+TEXT = "#d6e4ee"
+MUTED = "#6c7a8c"
+ACCENT = "#5ad1b4"       # terminal teal
+ACCENT_WARM = "#f2a154"  # amber accent
 
-EDGE_INTRA = "#3a7bd5"
-EDGE_CROSS = "#d9534f"
-EDGE_HIGHLIGHT = "#f0ad4e"
-NODE_HIGHLIGHT = "#f0ad4e"
+EDGE_INTRA = "#4a8fe6"
+EDGE_CROSS = "#e05a5a"
+EDGE_HIGHLIGHT = "#f2d35a"
+NODE_HIGHLIGHT = "#f2d35a"
+
+MONO = "'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', 'monospace'"
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +288,12 @@ def _normalize(coords: np.ndarray) -> np.ndarray:
 def layout_spring(ei, n, dim, spacing=1.0, **_):
     import networkx as nx
     G = _nx_graph(ei, n)
-    # higher k = stronger repulsion = more inter-node space
-    k = spacing * 1.0 / max(np.sqrt(n), 1.0)
-    pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=120, k=k)
+    # spring layout density mostly depends on k relative to sqrt(n)
+    # (stronger repulsion) and iterations (convergence). Boost both with
+    # spacing so higher values actually push nodes apart, not just scale.
+    k = spacing * 2.0 / max(np.sqrt(n), 1.0)
+    iters = min(600, 150 + int(40 * spacing))
+    pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=iters, k=k)
     coords = np.array([pos[i] for i in range(n)], dtype=np.float32)
     return _normalize(coords) * spacing
 
@@ -326,6 +332,10 @@ def layout_spectral(ei, n, dim, spacing=1.0, **_):
     coords = vecs[:, 1:dim + 1]
     if coords.shape[1] < dim:
         coords = np.hstack([coords, np.zeros((n, dim - coords.shape[1]))])
+    # Whiten each axis so clusters aren't squashed into a line by a dominant
+    # eigenvector, then scale by spacing.
+    std = coords.std(axis=0) + 1e-9
+    coords = coords / std
     return _normalize(coords) * spacing
 
 
@@ -347,12 +357,24 @@ def layout_circular(ei, n, dim, spacing=1.0, **_):
 
 
 def layout_community(ei, n, dim, communities=None, spacing=1.0, **_):
+    """Cluster-first layout: place each community at a well-separated center
+    on a circle/sphere, then spring-embed each community around its center.
+    This gives the most *interpretable* visual: groups are obvious, and edges
+    within vs. across groups are visually distinct.
+    """
     import networkx as nx
     if communities is None:
         communities = detect_communities(ei, n)
     n_comms = int(communities.max()) + 1
-    # spacing scales only the inter-cluster radius; intra-cluster stays ~1
-    centers = layout_circular(None, n_comms, dim, spacing=1.0) * (3.0 + 2.0 * spacing)
+    # Inter-cluster radius grows with both the number of communities
+    # (so they don't overlap) and with spacing. This is the knob that
+    # actually changes what you *see*.
+    inter_r = (2.5 + 1.8 * spacing) * max(1.0, np.sqrt(n_comms) / 2.0)
+    # Intra-cluster radius shrinks a little so clusters look tight and
+    # inter-cluster separation dominates.
+    intra_r = 0.45 + 0.15 * spacing
+
+    centers = layout_circular(None, n_comms, dim, spacing=1.0) * inter_r
     coords = np.zeros((n, dim), dtype=np.float32)
     for c in range(n_comms):
         nodes_c = np.where(communities == c)[0]
@@ -371,9 +393,14 @@ def layout_community(ei, n, dim, communities=None, spacing=1.0, **_):
             G = nx.Graph()
             G.add_nodes_from(range(len(nodes_c)))
             G.add_edges_from(local_ei_remapped.T.tolist())
-            pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=50, scale=1.0)
+            # Shorter spring run since clusters are small.
+            pos = nx.spring_layout(G, dim=dim, seed=SEED, iterations=80,
+                                    k=1.5 / max(np.sqrt(len(nodes_c)), 1.0))
             local_pos = np.array([pos[i] for i in range(len(nodes_c))],
                                   dtype=np.float32)
+            # normalize each cluster so they're the same size regardless of n
+            span = np.max(np.abs(local_pos)) + 1e-9
+            local_pos = local_pos / span * intra_r
         coords[nodes_c] = centers[c] + local_pos
     return coords.astype(np.float32)
 
@@ -391,6 +418,37 @@ LAYOUTS: dict[str, Callable] = {
 # Dataset / custom-file loading
 # ---------------------------------------------------------------------------
 
+def _try_load_names(dataset: str, num_nodes: int) -> Optional[list]:
+    """Optional sidecar: if ``figures/data/<dataset>/node_names.{json,txt}``
+    exists, treat it as the human-readable node name list. Otherwise we
+    return None and the viewer falls back to ``<noun> <id>``.
+
+    This exists because the standard Planetoid (Cora/CiteSeer/PubMed) and
+    OGB distributions don't ship per-node titles — the only honest way to
+    show real names is to let the user provide them.
+    """
+    import json
+    base = PROJECT_ROOT / "figures" / "data" / dataset
+    for fn in ("node_names.json", "node_names.txt"):
+        p = base / fn
+        if not p.exists():
+            continue
+        try:
+            if fn.endswith(".json"):
+                data = json.loads(p.read_text())
+                if isinstance(data, dict):
+                    return [data.get(str(i)) or data.get(i) for i in range(num_nodes)]
+                if isinstance(data, list) and len(data) >= num_nodes:
+                    return list(data)
+            else:
+                lines = p.read_text().splitlines()
+                if len(lines) >= num_nodes:
+                    return [ln.strip() for ln in lines[:num_nodes]]
+        except Exception:
+            pass
+    return None
+
+
 def load_registry_dataset(name: str):
     from src.data import load_dataset
     g = load_dataset(name)
@@ -401,6 +459,7 @@ def load_registry_dataset(name: str):
         "num_nodes": g.num_nodes,
         "edge_index": g.edge_index.numpy(),
         "labels": g.node_labels.numpy() if g.node_labels is not None else None,
+        "node_names": _try_load_names(g.name, g.num_nodes),
     }
 
 
@@ -565,75 +624,158 @@ _STYLE = f"""
 QMainWindow, QWidget {{
     background-color: {BG_DARK};
     color: {TEXT};
-    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-family: {MONO};
     font-size: 12px;
 }}
 QFrame#sidebar, QFrame#legendPanel {{
     background-color: {PANEL_BG};
     border: 1px solid {PANEL_BORDER};
-    border-radius: 8px;
+    border-radius: 2px;
 }}
 QLabel {{
     color: {TEXT};
 }}
 QLabel[role="section"] {{
-    color: {MUTED};
+    color: {ACCENT};
     font-size: 10px;
-    font-weight: bold;
-    letter-spacing: 1px;
+    font-weight: 700;
+    letter-spacing: 2px;
     text-transform: uppercase;
     padding-top: 4px;
+    border-bottom: 1px dashed {PANEL_BORDER};
+    padding-bottom: 2px;
+    margin-bottom: 2px;
 }}
 QLabel[role="muted"] {{
     color: {MUTED};
     font-size: 11px;
 }}
+QLabel[role="title"] {{
+    color: {ACCENT};
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}}
+QLabel[role="subtitle"] {{
+    color: {MUTED};
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}}
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
     background-color: {BG_DARK};
     color: {TEXT};
     border: 1px solid {PANEL_BORDER};
-    border-radius: 4px;
+    border-radius: 2px;
     padding: 5px 8px;
     min-height: 22px;
+    selection-background-color: {ACCENT};
+    selection-color: {BG_DARK};
 }}
+QComboBox:focus, QSpinBox:focus, QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox QAbstractItemView {{
     background: {PANEL_BG};
     color: {TEXT};
     selection-background-color: {ACCENT};
+    selection-color: {BG_DARK};
     border: 1px solid {PANEL_BORDER};
+    outline: 0;
 }}
 QPushButton {{
-    background-color: {ACCENT};
-    color: #0c1016;
-    font-weight: 600;
-    border: none;
-    border-radius: 5px;
-    padding: 7px 12px;
-}}
-QPushButton:hover {{ background-color: #6fcce3; }}
-QPushButton:disabled {{ background-color: #2a3440; color: {MUTED}; }}
-QPushButton[role="secondary"] {{
     background-color: transparent;
+    color: {ACCENT};
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: 1px solid {ACCENT};
+    border-radius: 2px;
+    padding: 7px 12px;
+    text-transform: uppercase;
+}}
+QPushButton:hover {{ background-color: {ACCENT}; color: {BG_DARK}; }}
+QPushButton:disabled {{ border-color: {PANEL_BORDER}; color: {MUTED}; }}
+QPushButton[role="secondary"] {{
     color: {TEXT};
     border: 1px solid {PANEL_BORDER};
     font-weight: 500;
+    letter-spacing: 0px;
+    text-transform: none;
 }}
-QPushButton[role="secondary"]:hover {{ background-color: #20272f; }}
+QPushButton[role="secondary"]:hover {{ background-color: {PANEL_BORDER}; color: {TEXT}; }}
+QPushButton:checked {{
+    background-color: {ACCENT};
+    color: {BG_DARK};
+    border-color: {ACCENT};
+}}
 QSlider::groove:horizontal {{
-    height: 4px;
+    height: 3px;
     background: {PANEL_BORDER};
-    border-radius: 2px;
+    border-radius: 0;
 }}
 QSlider::handle:horizontal {{
     background: {ACCENT};
-    width: 14px; height: 14px;
+    width: 10px; height: 14px;
     margin: -6px 0;
-    border-radius: 7px;
+    border-radius: 0;
+    border: 1px solid {ACCENT};
+}}
+QCheckBox {{ spacing: 8px; }}
+QCheckBox::indicator {{
+    width: 13px; height: 13px;
+    border: 1px solid {PANEL_BORDER};
+    background: {BG_DARK};
+    border-radius: 0;
+}}
+QCheckBox::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
 }}
 QScrollArea {{
     border: none;
     background-color: transparent;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}}
+QScrollBar::handle:vertical {{
+    background: {PANEL_BORDER};
+    border-radius: 0;
+    min-height: 20px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QTabWidget::pane {{
+    border: 1px solid {PANEL_BORDER};
+    border-radius: 2px;
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {MUTED};
+    padding: 6px 14px;
+    border: 1px solid {PANEL_BORDER};
+    border-bottom: 0;
+    margin-right: 2px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QTabBar::tab:selected {{
+    color: {ACCENT};
+    background: {PANEL_BG};
+    border-color: {ACCENT};
+}}
+QTabBar::tab:hover:!selected {{ color: {TEXT}; }}
+QSplitter::handle {{ background: {PANEL_BORDER}; }}
+QSplitter::handle:hover {{ background: {ACCENT}; }}
+QToolTip {{
+    background: {PANEL_BG};
+    color: {TEXT};
+    border: 1px solid {ACCENT};
+    padding: 4px 6px;
 }}
 """
 
@@ -683,7 +825,7 @@ def _make_qt_classes():
                     w.deleteLater()
 
         def _section(self, title: str):
-            lab = QtWidgets.QLabel(title)
+            lab = QtWidgets.QLabel(f"▎ {title}")
             lab.setProperty("role", "section")
             self._content_box.addWidget(lab)
 
@@ -694,10 +836,11 @@ def _make_qt_classes():
             hl.setContentsMargins(0, 0, 0, 0)
             hl.setSpacing(8)
             swatch = QtWidgets.QLabel()
-            swatch.setFixedSize(16, 16)
+            swatch.setFixedSize(14, 14)
             swatch.setStyleSheet(
-                f"background-color: {color_hex}; border: 1px solid {PANEL_BORDER};"
-                " border-radius: 3px;"
+                f"background-color: {color_hex};"
+                f" border: 1px solid rgba(255,255,255,0.18);"
+                f" border-radius: 0;"
             )
             hl.addWidget(swatch)
             label = QtWidgets.QLabel(text)
@@ -752,14 +895,16 @@ def _make_qt_classes():
     # Stats panel — graph-level statistics (Statistics tab)
     # ------------------------------------------------------------------
     class StatsPanel(QtWidgets.QFrame):
+        """Graph statistics shown as charts, not just numbers."""
+
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setObjectName("legendPanel")
             v = QtWidgets.QVBoxLayout(self)
-            v.setContentsMargins(14, 14, 14, 14)
-            v.setSpacing(6)
+            v.setContentsMargins(10, 10, 10, 10)
+            v.setSpacing(4)
             self._container = QtWidgets.QVBoxLayout()
-            self._container.setSpacing(4)
+            self._container.setSpacing(8)
             inner = QtWidgets.QWidget()
             inner.setLayout(self._container)
             scroll = QtWidgets.QScrollArea()
@@ -775,16 +920,9 @@ def _make_qt_classes():
                     w.deleteLater()
 
         def _section(self, title):
-            lab = QtWidgets.QLabel(title)
+            lab = QtWidgets.QLabel(f"▎ {title}")
             lab.setProperty("role", "section")
             self._container.addWidget(lab)
-
-        def _pair(self, k, v):
-            line = QtWidgets.QLabel(
-                f"<span style='color:{MUTED}'>{k}</span>  "
-                f"<span style='font-weight:600'>{v}</span>")
-            line.setTextFormat(QtCore.Qt.RichText)
-            self._container.addWidget(line)
 
         @staticmethod
         def _fmt(v):
@@ -792,49 +930,210 @@ def _make_qt_classes():
                 if v == 0:
                     return "0"
                 if abs(v) < 1e-3:
-                    return f"{v:.2e}"
-                return f"{v:.4f}".rstrip("0").rstrip(".")
-            return f"{v:,}"
+                    return f"{v:.1e}"
+                return f"{v:.3f}".rstrip("0").rstrip(".")
+            if isinstance(v, int):
+                if v >= 1_000_000:
+                    return f"{v/1e6:.2f}M"
+                if v >= 1_000:
+                    return f"{v/1e3:.1f}k"
+                return f"{v:,}"
+            return str(v)
+
+        def _tile(self, label: str, value: str, accent: str = ACCENT):
+            w = QtWidgets.QFrame()
+            w.setStyleSheet(
+                f"QFrame {{ background: {BG_DARK};"
+                f" border: 1px solid {PANEL_BORDER}; border-radius: 2px; }}"
+                f" QFrame:hover {{ border-color: {accent}; }}"
+            )
+            vl = QtWidgets.QVBoxLayout(w)
+            vl.setContentsMargins(10, 8, 10, 8)
+            vl.setSpacing(2)
+            big = QtWidgets.QLabel(value)
+            big.setStyleSheet(
+                f"color: {accent}; font-size: 18px; font-weight: 700;"
+                f" font-family: {MONO}; letter-spacing: 1px;"
+                f" border: none;"
+            )
+            small = QtWidgets.QLabel(label.upper())
+            small.setStyleSheet(
+                f"color: {MUTED}; font-size: 9px; letter-spacing: 2px;"
+                f" border: none;"
+            )
+            vl.addWidget(big)
+            vl.addWidget(small)
+            return w
+
+        def _tile_grid(self, tiles: list, cols: int = 3):
+            grid_w = QtWidgets.QWidget()
+            grid = QtWidgets.QGridLayout(grid_w)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setSpacing(6)
+            for i, tile in enumerate(tiles):
+                grid.addWidget(tile, i // cols, i % cols)
+            self._container.addWidget(grid_w)
+
+        def _make_plot(self, title: str, height: int = 150):
+            pw = pg.PlotWidget()
+            pw.setBackground(BG_DARK)
+            pw.setMinimumHeight(height)
+            pw.setMaximumHeight(height + 30)
+            pw.setTitle(
+                f"<span style='color:{MUTED}; font-family:{MONO};"
+                f" font-size:10px; letter-spacing:2px;'>{title.upper()}</span>"
+            )
+            pi = pw.getPlotItem()
+            pi.setMenuEnabled(False)
+            for ax_name in ("left", "bottom"):
+                ax = pi.getAxis(ax_name)
+                ax.setPen(pg.mkPen(PANEL_BORDER))
+                ax.setTextPen(pg.mkPen(MUTED))
+                ax.setStyle(tickFont=QtGui.QFont("Menlo", 8))
+            pi.showGrid(x=False, y=True, alpha=0.15)
+            pw.setStyleSheet(
+                f"border: 1px solid {PANEL_BORDER}; border-radius: 2px;"
+            )
+            return pw
+
+        def _bar_plot(self, title: str, xs, ys, colors=None, labels=None):
+            pw = self._make_plot(title)
+            xs = np.asarray(xs, dtype=np.float64)
+            ys = np.asarray(ys, dtype=np.float64)
+            if colors is None:
+                brushes = [pg.mkBrush(ACCENT) for _ in xs]
+            else:
+                brushes = [pg.mkBrush(*hex_to_rgba(c, 235)) for c in colors]
+            width = 0.78
+            for i, (x, y, br) in enumerate(zip(xs, ys, brushes)):
+                bg = pg.BarGraphItem(x=[x], height=[y], width=width, brush=br,
+                                      pen=pg.mkPen(BG_DARK, width=1))
+                pw.addItem(bg)
+            if labels is not None:
+                ax = pw.getPlotItem().getAxis("bottom")
+                ax.setTicks([list(zip(xs, labels))])
+                # rotate-ish: shrink font for many labels
+                if len(labels) > 6:
+                    ax.setStyle(tickFont=QtGui.QFont("Menlo", 7))
+            self._container.addWidget(pw)
+            return pw
+
+        def _hist_plot(self, title: str, values: np.ndarray, bins: int = 24,
+                       log_x: bool = False):
+            pw = self._make_plot(title, height=140)
+            v = np.asarray(values)
+            if len(v) == 0:
+                self._container.addWidget(pw)
+                return pw
+            if log_x:
+                vpos = v[v > 0]
+                if len(vpos) == 0:
+                    self._container.addWidget(pw)
+                    return pw
+                edges = np.logspace(np.log10(vpos.min()),
+                                    np.log10(vpos.max() + 1), bins)
+                counts, edges = np.histogram(vpos, bins=edges)
+                centers = np.sqrt(edges[:-1] * edges[1:])
+                widths = edges[1:] - edges[:-1]
+                pw.setLogMode(x=True, y=False)
+            else:
+                counts, edges = np.histogram(v, bins=bins)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                widths = (edges[1] - edges[0]) * 0.9 * np.ones_like(centers)
+            bg = pg.BarGraphItem(
+                x=centers, height=counts, width=widths,
+                brush=pg.mkBrush(*hex_to_rgba(ACCENT, 210)),
+                pen=pg.mkPen(BG_DARK, width=1),
+            )
+            pw.addItem(bg)
+            self._container.addWidget(pw)
+            return pw
 
         def set_bundle(self, b: GraphBundle):
             self._clear()
-            self._section("DATASET")
-            self._pair("name", b.name)
-            self._pair("domain", b.domain)
-            self._pair("split", b.split)
-            self._pair("sampled from", f"{b.full_nodes:,} nodes")
-            self._pair("sample method", b.sample_method)
-            self._pair("layout", f"{b.layout_name} · {b.dim}D")
-
-            self._section("STRUCTURE")
             s = b.stats
-            pretty = {
-                "nodes": "nodes", "edges": "edges",
-                "density": "density",
-                "degree_mean": "degree (mean)",
-                "degree_median": "degree (median)",
-                "degree_max": "degree (max)",
-                "isolated_nodes": "isolated nodes",
-                "connected_components": "components",
-                "largest_cc": "largest component",
-                "largest_cc_fraction": "largest cc / n",
-                "avg_clustering_sampled": "avg clustering (sampled)",
-                "num_communities": "communities (Louvain)",
-            }
-            for key, label in pretty.items():
-                if key in s:
-                    self._pair(label, self._fmt(s[key]))
+            n, m = s.get("nodes", 0), s.get("edges", 0)
 
-            self._section(f"LABELS ({b.label_kind})")
+            # --- Header tiles ---
+            self._section("OVERVIEW")
+            self._tile_grid([
+                self._tile("nodes", self._fmt(n)),
+                self._tile("edges", self._fmt(m)),
+                self._tile("density", self._fmt(s.get("density", 0.0)),
+                           accent=ACCENT_WARM),
+                self._tile("avg degree",
+                           self._fmt(s.get("degree_mean", 0.0))),
+                self._tile("components",
+                           self._fmt(s.get("connected_components", 0)),
+                           accent=ACCENT_WARM),
+                self._tile("clustering",
+                           self._fmt(s.get("avg_clustering_sampled", 0.0))),
+            ], cols=3)
+
+            # --- Degree distribution histogram ---
+            self._section("DEGREE DISTRIBUTION")
+            deg = np.bincount(b.edge_index[0], minlength=len(b.coords))
+            if len(deg) and deg.max() > 1:
+                self._hist_plot("degrees (log scale)", deg, bins=24, log_x=True)
+            else:
+                self._hist_plot("degrees", deg, bins=12)
+
+            # --- Label distribution bars ---
             counts = np.bincount(b.labels.astype(np.int64))
+            legend_colors = [hx for _, hx in b.legend]
+            labels_text = []
             for lid in range(len(counts)):
                 if b.label_kind == "class":
                     nm = class_name(b.name, lid)
                 elif b.label_kind == "community":
-                    nm = f"cluster {lid}"
+                    nm = f"c{lid}"
                 else:
-                    nm = f"bucket {lid}"
-                self._pair(nm, self._fmt(int(counts[lid])))
+                    nm = f"b{lid}"
+                labels_text.append(nm[:10])
+            # sort bars by count desc for easier reading when many communities
+            order = np.argsort(-counts)
+            show = order[:min(15, len(order))]
+            self._section(f"NODES BY {b.label_kind.upper()}")
+            self._bar_plot(
+                f"{b.label_kind} sizes (top {len(show)})",
+                np.arange(len(show)),
+                counts[show],
+                colors=[legend_colors[i] if i < len(legend_colors) else ACCENT
+                        for i in show],
+                labels=[labels_text[i] for i in show],
+            )
+
+            # --- Connectivity tile row ---
+            self._section("CONNECTIVITY")
+            self._tile_grid([
+                self._tile("isolated nodes",
+                           self._fmt(s.get("isolated_nodes", 0))),
+                self._tile("largest CC",
+                           self._fmt(s.get("largest_cc", 0)),
+                           accent=ACCENT_WARM),
+                self._tile("lCC / n",
+                           self._fmt(s.get("largest_cc_fraction", 0.0))),
+                self._tile("max degree",
+                           self._fmt(s.get("degree_max", 0))),
+                self._tile("communities",
+                           self._fmt(s.get("num_communities", 0)),
+                           accent=ACCENT_WARM),
+                self._tile("sampled",
+                           f"{len(b.keep_ids):,}/{b.full_nodes:,}"),
+            ], cols=3)
+
+            # --- Meta footer ---
+            self._section("SAMPLE")
+            meta = QtWidgets.QLabel(
+                f"<span style='color:{MUTED}'>source</span> {b.name} "
+                f"· <span style='color:{MUTED}'>domain</span> {b.domain}<br>"
+                f"<span style='color:{MUTED}'>method</span> {b.sample_method} "
+                f"· <span style='color:{MUTED}'>layout</span> {b.layout_name} "
+                f"({b.dim}D)"
+            )
+            meta.setTextFormat(QtCore.Qt.RichText)
+            meta.setWordWrap(True)
+            self._container.addWidget(meta)
             self._container.addStretch(1)
 
     # ------------------------------------------------------------------
@@ -866,7 +1165,7 @@ def _make_qt_classes():
                     w.deleteLater()
 
         def _section(self, title):
-            lab = QtWidgets.QLabel(title)
+            lab = QtWidgets.QLabel(f"▎ {title}")
             lab.setProperty("role", "section")
             self._container.addWidget(lab)
 
@@ -880,8 +1179,15 @@ def _make_qt_classes():
 
         def clear(self):
             self._reset()
-            hint = QtWidgets.QLabel("Click any node to see its details here.")
+            hint = QtWidgets.QLabel(
+                "▎ NO SELECTION\n\n"
+                "Click any node in the graph to see its details here."
+            )
             hint.setProperty("role", "muted")
+            hint.setStyleSheet(
+                f"color: {MUTED}; font-family: {MONO};"
+                f" font-size: 11px; line-height: 1.4em;"
+            )
             hint.setWordWrap(True)
             self._container.addWidget(hint)
             self._container.addStretch(1)
@@ -909,6 +1215,16 @@ def _make_qt_classes():
 
             self._section("NODE")
             self._pair("name", node_label(b.name, orig_id, b.node_names))
+            if b.node_names is None:
+                note = QtWidgets.QLabel(
+                    f"<span style='color:{MUTED}'>"
+                    f"// no titles shipped for {b.name}. drop a file at "
+                    f"figures/data/{b.name}/node_names.json "
+                    f"(list or id→name map) to show real names.</span>"
+                )
+                note.setTextFormat(QtCore.Qt.RichText)
+                note.setWordWrap(True)
+                self._container.addWidget(note)
             self._pair("id (original)", f"{orig_id:,}")
             self._pair("id (sample)", f"{i:,}")
             self._pair(b.label_kind, lab_txt)
@@ -1476,10 +1792,10 @@ def _make_qt_classes():
             root.setContentsMargins(16, 16, 16, 16)
             root.setSpacing(10)
 
-            title = QtWidgets.QLabel("NetFM Graph Explorer")
-            title.setStyleSheet("font-size: 16px; font-weight: 600;")
-            sub = QtWidgets.QLabel("Interactive 2D/3D graph viewer")
-            sub.setProperty("role", "muted")
+            title = QtWidgets.QLabel("▮ NETFM ▮ GRAPH EXPLORER")
+            title.setProperty("role", "title")
+            sub = QtWidgets.QLabel("  // interactive 2D/3D network viewer")
+            sub.setProperty("role", "subtitle")
             root.addWidget(title)
             root.addWidget(sub)
 
@@ -1515,16 +1831,16 @@ def _make_qt_classes():
             w = QtWidgets.QWidget(); w.setLayout(dim_row)
             root.addWidget(w)
 
-            # layout
+            # layout — default to community because it's the most readable
             self.layout_combo = QtWidgets.QComboBox()
             self.layout_combo.addItems(list(LAYOUTS.keys()))
-            self.layout_combo.setCurrentText("spring")
+            self.layout_combo.setCurrentText("community")
             root.addWidget(QtWidgets.QLabel("Layout algorithm"))
             root.addWidget(self.layout_combo)
 
-            # color by
+            # color by — default to community so the clustering stands out
             self.color_combo = QtWidgets.QComboBox()
-            self.color_combo.addItems(["class", "community", "degree"])
+            self.color_combo.addItems(["community", "class", "degree"])
             root.addWidget(QtWidgets.QLabel("Color by"))
             root.addWidget(self.color_combo)
 
@@ -1544,15 +1860,15 @@ def _make_qt_classes():
 
             # layout spacing — spreads nodes further apart (slider / 10 = factor)
             self.spacing_slider = self._make_slider(
-                5, 150, 20, "Node spacing  (x0.1)",
+                5, 250, 40, "Node spacing  (×0.1)",
             )
             root.addWidget(self.spacing_slider[0])
 
             # appearance
             root.addWidget(self._section("APPEARANCE"))
-            self.node_slider = self._make_slider(4, 40, 14, "Node size")
+            self.node_slider = self._make_slider(4, 50, 18, "Node size")
             self.edge_slider = self._make_slider(1, 6, 2, "Edge width")
-            self.alpha_slider = self._make_slider(20, 255, 110, "Edge opacity")
+            self.alpha_slider = self._make_slider(10, 255, 60, "Edge opacity")
             for w in self.node_slider[0], self.edge_slider[0], self.alpha_slider[0]:
                 root.addWidget(w)
 
