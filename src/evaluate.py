@@ -1,18 +1,21 @@
 """
 Downstream evaluation runner for NetFM + baselines.
 
-For each (method, dataset, applicable task) combination:
-  1. Produce embeddings (or train supervised end-to-end)
-  2. Run the task with the SAME split across methods (fair comparison)
-  3. Save per-plot PNG, append metrics to results.csv
-  4. At the end, render a summary table
+Three evaluation settings (see architecture.md §5.2):
+  * zero_shot  — frozen encoder + LogisticRegression / dot-product
+  * few_shot   — fine-tune netfm (and subsample labels for others)
+                 on K labels per class; netfm becomes encoder+head joint
+  * supervised — train a fresh supervised GCN end-to-end on full labels;
+                 frozen baselines are still reported as a reference
+
+Plots are organised as `plots/<task>/<dataset>/<method>.png` so every
+(task, dataset) pair has its own folder.
 
 Usage:
     python -m src.evaluate \
         --checkpoint outputs/training/<run_id>/encoder.pt \
-        --methods netfm,structural,svd,random,node2vec \
-        --datasets lastfm_asia,ogbn_arxiv \
-        --run-name v1
+        --setting few_shot --k-per-class 10 \
+        --run-name v1_fewshot
 """
 
 from __future__ import annotations
@@ -33,12 +36,18 @@ from src.baselines import (
     embed_node2vec,
     embed_random,
     embed_structural,
+    embed_structural as embed_structural_for_sup,
     embed_svd,
     supervised_link_prediction,
     supervised_node_classification,
 )
 from src.data import HELDOUT_DATASETS, load_dataset
 from src.features import DEFAULT_SVD_DIM
+from src.finetune import (
+    few_shot_subsample,
+    finetune_netfm_link_prediction,
+    finetune_netfm_node_classification,
+)
 from src.tasks import (
     LinkPredResult,
     NodeClsResult,
@@ -52,8 +61,10 @@ from src.tasks import (
 )
 
 
+SETTINGS = ("zero_shot", "few_shot", "supervised")
+
 CSV_COLS = [
-    "method", "task", "dataset",
+    "setting", "method", "task", "dataset",
     "acc", "top5_acc", "macro_f1", "weighted_f1",
     "auc", "ap", "hits_50", "hits_100", "mrr",
     "train_size", "test_size", "num_classes",
@@ -99,12 +110,20 @@ def can_link_predict(graph) -> bool:
     return graph.edge_index is not None and graph.edge_index.size(1) > 10
 
 
+def _plot_path(plots_dir: Path, task: str, dataset: str, method: str) -> Path:
+    d = plots_dir / task / dataset
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{method}.png"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def evaluate(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.setting not in SETTINGS:
+        raise ValueError(f"--setting must be one of {SETTINGS}")
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.run_name:
@@ -116,6 +135,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
     print(f"run_id: {run_id}")
     print(f"run dir: {run_dir}")
+    print(f"setting: {args.setting}")
     print(f"device: {device}")
 
     with open(run_dir / "args.json", "w") as f:
@@ -125,10 +145,6 @@ def evaluate(args: argparse.Namespace) -> None:
     datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
     checkpoint = Path(args.checkpoint) if args.checkpoint else None
 
-    # Include supervised only if explicitly requested
-    include_sup = args.include_supervised
-
-    # CSV header
     csv_path = run_dir / "results.csv"
     with open(csv_path, "w", newline="") as f:
         csv.DictWriter(f, fieldnames=CSV_COLS).writeheader()
@@ -138,7 +154,6 @@ def evaluate(args: argparse.Namespace) -> None:
         graph = load_dataset(dname)
         labels = graph.node_labels.cpu().numpy() if graph.node_labels is not None else None
 
-        # Shared splits — so every method evaluates on the same test set
         do_ncls = can_node_classify(graph)
         do_lp = can_link_predict(graph)
 
@@ -153,73 +168,137 @@ def evaluate(args: argparse.Namespace) -> None:
         else:
             lp_pos_src = lp_pos_dst = lp_neg = None
 
-        for method in methods:
-            print(f"\n[{dname}] method={method}")
-            t0 = time.time()
-            try:
-                emb = get_embeddings(method, graph, checkpoint, device, args.seed)
-                print(f"  embedded in {time.time() - t0:.1f}s  shape={emb.shape}")
-            except Exception as e:
-                print(f"  SKIP embedding: {e}")
-                continue
+        # Few-shot subsampling (labels for NC). Done once per dataset, shared.
+        if args.setting == "few_shot" and do_ncls:
+            tr_full = ncls_split[0]
+            tr_sub = few_shot_subsample(tr_full, labels, args.k_per_class, seed=args.seed)
+            print(f"few-shot: {len(tr_full)} train labels -> {len(tr_sub)} "
+                  f"({args.k_per_class}/class)")
+            ncls_train = tr_sub
+        else:
+            ncls_train = ncls_split[0] if do_ncls else None
+        ncls_test = ncls_split[2] if do_ncls else None
 
-            # Guard: skip degenerate (zero-variance / all-zero) embeddings.
-            # Happens e.g. for SVD on graphs with no original features.
-            max_std = float(emb.std(axis=0).max())
-            if max_std < 1e-10:
-                print(f"  SKIP: embedding has zero variance (max std = {max_std:.2e})")
-                continue
+        # Per-method loop (skipped entirely for supervised setting)
+        if args.setting != "supervised":
+            for method in methods:
+                print(f"\n[{args.setting}][{dname}] method={method}")
+                t0 = time.time()
 
-            # Node classification
-            if do_ncls:
-                tr, _, te = ncls_split
+                # For few-shot + netfm, skip frozen embed and go straight to FT
+                if args.setting == "few_shot" and method == "netfm":
+                    if checkpoint is None:
+                        print("  SKIP: netfm few-shot needs --checkpoint")
+                        continue
+
+                    if do_ncls:
+                        try:
+                            res, _ = finetune_netfm_node_classification(
+                                graph, checkpoint, labels, ncls_train, ncls_test,
+                                device, epochs=args.ft_epochs_nc,
+                                lr=args.ft_lr, weight_decay=args.ft_wd,
+                                head_hidden=args.ft_head_hidden,
+                                verbose=args.verbose,
+                            )
+                            emb_struct = embed_structural_for_sup(graph)
+                            plot_node_classification(
+                                res, emb_struct, labels,
+                                _plot_path(plots_dir, "node_classification", dname, method),
+                                title=f"Node classification — {dname} — {method} (few-shot FT)",
+                            )
+                            _append_row(csv_path, result_to_row(
+                                method, "node_classification", dname, res,
+                                setting=args.setting,
+                            ))
+                            print(f"  ncls-ft acc={res.accuracy:.4f}  macro_f1={res.macro_f1:.4f}")
+                        except Exception as e:
+                            print(f"  ncls-ft FAILED: {e}")
+
+                    if do_lp:
+                        try:
+                            res, _ = finetune_netfm_link_prediction(
+                                graph, checkpoint, lp_pos_src, lp_pos_dst, lp_neg,
+                                device, epochs=args.ft_epochs_lp,
+                                lr=args.ft_lr, weight_decay=args.ft_wd,
+                                verbose=args.verbose,
+                            )
+                            plot_link_prediction(
+                                res,
+                                _plot_path(plots_dir, "link_prediction", dname, method),
+                                title=f"Link prediction — {dname} — {method} (few-shot FT)",
+                            )
+                            _append_row(csv_path, result_to_row(
+                                method, "link_prediction", dname, res,
+                                setting=args.setting,
+                            ))
+                            print(f"  lp-ft auc={res.auc:.4f}  ap={res.ap:.4f}")
+                        except Exception as e:
+                            print(f"  lp-ft FAILED: {e}")
+                    continue
+
+                # Frozen-embedding path (zero_shot always, few_shot for non-netfm)
                 try:
-                    res: NodeClsResult = run_node_classification(
-                        emb, labels, train_idx=tr, test_idx=te, seed=args.seed,
-                    )
-                    plot_path = plots_dir / f"nodeclass_{dname}_{method}.png"
-                    plot_node_classification(
-                        res, emb, labels, plot_path,
-                        title=f"Node classification — {dname} — {method}",
-                    )
-                    row = result_to_row(method, "node_classification", dname, res)
-                    _append_row(csv_path, row)
-                    print(f"  ncls acc={res.accuracy:.4f}  macro_f1={res.macro_f1:.4f}  → {plot_path.name}")
+                    emb = get_embeddings(method, graph, checkpoint, device, args.seed)
+                    print(f"  embedded in {time.time() - t0:.1f}s  shape={emb.shape}")
                 except Exception as e:
-                    print(f"  ncls FAILED: {e}")
+                    print(f"  SKIP embedding: {e}")
+                    continue
 
-            # Link prediction
-            if do_lp:
-                try:
-                    res: LinkPredResult = run_link_prediction(
-                        emb, graph.edge_index, graph.num_nodes,
-                        seed=args.seed,
-                        pos_src_override=lp_pos_src,
-                        pos_dst_override=lp_pos_dst,
-                        neg_override=lp_neg,
-                    )
-                    plot_path = plots_dir / f"linkpred_{dname}_{method}.png"
-                    plot_link_prediction(
-                        res, plot_path,
-                        title=f"Link prediction — {dname} — {method}",
-                    )
-                    row = result_to_row(method, "link_prediction", dname, res)
-                    _append_row(csv_path, row)
-                    print(f"  lp auc={res.auc:.4f}  ap={res.ap:.4f}  hits@50={res.hits_at_50:.4f}  → {plot_path.name}")
-                except Exception as e:
-                    print(f"  lp FAILED: {e}")
+                max_std = float(emb.std(axis=0).max())
+                if max_std < 1e-10:
+                    print(f"  SKIP: zero-variance embedding (max std = {max_std:.2e})")
+                    continue
 
-        # Supervised baselines — trained on the task directly (no embed step)
-        if include_sup:
+                if do_ncls:
+                    try:
+                        res: NodeClsResult = run_node_classification(
+                            emb, labels, train_idx=ncls_train, test_idx=ncls_test,
+                            seed=args.seed,
+                        )
+                        plot_node_classification(
+                            res, emb, labels,
+                            _plot_path(plots_dir, "node_classification", dname, method),
+                            title=f"Node classification — {dname} — {method} ({args.setting})",
+                        )
+                        _append_row(csv_path, result_to_row(
+                            method, "node_classification", dname, res,
+                            setting=args.setting,
+                        ))
+                        print(f"  ncls acc={res.accuracy:.4f}  macro_f1={res.macro_f1:.4f}")
+                    except Exception as e:
+                        print(f"  ncls FAILED: {e}")
+
+                if do_lp:
+                    try:
+                        res: LinkPredResult = run_link_prediction(
+                            emb, graph.edge_index, graph.num_nodes,
+                            seed=args.seed,
+                            pos_src_override=lp_pos_src,
+                            pos_dst_override=lp_pos_dst,
+                            neg_override=lp_neg,
+                        )
+                        plot_link_prediction(
+                            res,
+                            _plot_path(plots_dir, "link_prediction", dname, method),
+                            title=f"Link prediction — {dname} — {method} ({args.setting})",
+                        )
+                        _append_row(csv_path, result_to_row(
+                            method, "link_prediction", dname, res,
+                            setting=args.setting,
+                        ))
+                        print(f"  lp auc={res.auc:.4f}  ap={res.ap:.4f}  hits@50={res.hits_at_50:.4f}")
+                    except Exception as e:
+                        print(f"  lp FAILED: {e}")
+
+        # Supervised GCN ceiling (setting=supervised only, or --include-supervised)
+        if args.setting == "supervised" or args.include_supervised:
             if do_ncls:
-                print(f"\n[{dname}] method=supervised_gcn (node classification)")
+                print(f"\n[{args.setting}][{dname}] method=supervised_gcn (NC)")
                 try:
-                    tr, _, te = ncls_split
+                    tr_full, _, te = ncls_split
                     preds = supervised_node_classification(
-                        graph, labels, tr, te, device, verbose=args.verbose,
+                        graph, labels, tr_full, te, device, verbose=args.verbose,
                     )
-                    # reuse Node classification scoring by passing one-hot embeddings
-                    # of the predictions directly — but simpler: compute metrics manually
                     from sklearn.metrics import (
                         accuracy_score, f1_score, confusion_matrix,
                     )
@@ -237,26 +316,26 @@ def evaluate(args: argparse.Namespace) -> None:
                         num_classes=num_classes,
                         y_true=y_true,
                         y_pred=y_pred,
-                        train_size=len(tr),
+                        train_size=len(tr_full),
                         test_size=len(te),
                     )
-                    # supervised GCN has no embeddings to TSNE — reuse structural for layout
                     sup_emb = embed_structural(graph)
-                    plot_path = plots_dir / f"nodeclass_{dname}_supervised_gcn.png"
                     plot_node_classification(
-                        res, sup_emb, labels, plot_path,
+                        res, sup_emb, labels,
+                        _plot_path(plots_dir, "node_classification", dname, "supervised_gcn"),
                         title=f"Node classification — {dname} — supervised_gcn (ceiling)",
                     )
-                    row = result_to_row("supervised_gcn", "node_classification", dname, res)
-                    _append_row(csv_path, row)
-                    print(f"  ncls acc={res.accuracy:.4f}  macro_f1={res.macro_f1:.4f}")
+                    _append_row(csv_path, result_to_row(
+                        "supervised_gcn", "node_classification", dname, res,
+                        setting=args.setting,
+                    ))
+                    print(f"  sup-gcn ncls acc={res.accuracy:.4f}  macro_f1={res.macro_f1:.4f}")
                 except Exception as e:
                     print(f"  sup-gcn ncls FAILED: {e}")
 
             if do_lp:
-                print(f"\n[{dname}] method=supervised_gcn (link prediction)")
+                print(f"\n[{args.setting}][{dname}] method=supervised_gcn (LP)")
                 try:
-                    # Train on edges NOT in the held-out set
                     edge_set = set(zip(
                         graph.edge_index[0].tolist(), graph.edge_index[1].tolist()
                     ))
@@ -265,8 +344,6 @@ def evaluate(args: argparse.Namespace) -> None:
                     keep = np.array(
                         [[a, b] for (a, b) in edge_set if (a, b) not in held]
                     ).T
-                    g_train = graph
-                    # Overwrite edge_index with the kept edges only for training
                     orig_ei = graph.edge_index
                     graph.edge_index = torch.from_numpy(keep).long()
                     emb_sup = supervised_link_prediction(
@@ -282,14 +359,16 @@ def evaluate(args: argparse.Namespace) -> None:
                         pos_dst_override=lp_pos_dst,
                         neg_override=lp_neg,
                     )
-                    plot_path = plots_dir / f"linkpred_{dname}_supervised_gcn.png"
                     plot_link_prediction(
-                        res, plot_path,
+                        res,
+                        _plot_path(plots_dir, "link_prediction", dname, "supervised_gcn"),
                         title=f"Link prediction — {dname} — supervised_gcn (ceiling)",
                     )
-                    row = result_to_row("supervised_gcn", "link_prediction", dname, res)
-                    _append_row(csv_path, row)
-                    print(f"  lp auc={res.auc:.4f}  ap={res.ap:.4f}")
+                    _append_row(csv_path, result_to_row(
+                        "supervised_gcn", "link_prediction", dname, res,
+                        setting=args.setting,
+                    ))
+                    print(f"  sup-gcn lp auc={res.auc:.4f}  ap={res.ap:.4f}")
                 except Exception as e:
                     print(f"  sup-gcn lp FAILED: {e}")
 
@@ -336,10 +415,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--datasets", type=str,
                    default=",".join(HELDOUT_DATASETS),
                    help="Comma-separated list of held-out datasets")
+    p.add_argument("--setting", type=str, default="zero_shot", choices=list(SETTINGS),
+                   help="Evaluation setting (zero_shot / few_shot / supervised)")
+    p.add_argument("--k-per-class", type=int, default=10,
+                   help="Labels per class for few-shot NC (default 10)")
+    p.add_argument("--ft-epochs-nc", type=int, default=100,
+                   help="NetFM fine-tune epochs for node classification")
+    p.add_argument("--ft-epochs-lp", type=int, default=50,
+                   help="NetFM fine-tune epochs for link prediction")
+    p.add_argument("--ft-lr", type=float, default=5e-4)
+    p.add_argument("--ft-wd", type=float, default=5e-4)
+    p.add_argument("--ft-head-hidden", type=int, default=0,
+                   help=">0 = use 2-layer MLP head with this hidden size")
     p.add_argument("--held-frac", type=float, default=0.1,
                    help="Fraction of edges held out for link prediction")
     p.add_argument("--include-supervised", action="store_true",
-                   help="Also train supervised GCN baselines (slower)")
+                   help="Also train supervised GCN baselines alongside the chosen setting")
     p.add_argument("--outputs-root", type=str, default="outputs/testing")
     p.add_argument("--run-name", type=str, default="")
     p.add_argument("--verbose", action="store_true")

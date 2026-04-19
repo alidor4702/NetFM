@@ -398,11 +398,12 @@ def plot_link_prediction(
 
 
 def result_to_row(
-    method: str, task: str, dataset: str, res
+    method: str, task: str, dataset: str, res, setting: str = "zero_shot",
 ) -> dict:
     """Flatten a result dataclass to a CSV-friendly row."""
     if isinstance(res, NodeClsResult):
         return {
+            "setting": setting,
             "method": method, "task": task, "dataset": dataset,
             "acc": res.accuracy, "top5_acc": res.top5_accuracy,
             "macro_f1": res.macro_f1, "weighted_f1": res.weighted_f1,
@@ -412,6 +413,7 @@ def result_to_row(
         }
     if isinstance(res, LinkPredResult):
         return {
+            "setting": setting,
             "method": method, "task": task, "dataset": dataset,
             "acc": "", "top5_acc": "", "macro_f1": "", "weighted_f1": "",
             "auc": res.auc, "ap": res.ap,
