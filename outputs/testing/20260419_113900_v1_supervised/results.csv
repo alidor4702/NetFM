@@ -1,0 +1,6 @@
+setting,method,task,dataset,acc,top5_acc,macro_f1,weighted_f1,auc,ap,hits_50,hits_100,mrr,train_size,test_size,num_classes
+supervised,supervised_gcn,node_classification,lastfm_asia,0.6861074705111402,nan,0.4725989381559537,0.6622766805504832,,,,,,4574,1526,18
+supervised,supervised_gcn,link_prediction,lastfm_asia,,,,,0.8742216310633064,0.9035839317814555,0.5285868392664509,0.6382596188421431,0.1507547111834153,,,
+supervised,supervised_gcn,node_classification,ogbn_arxiv,0.6970770593445527,nan,0.4673525009711235,0.6789671013927704,,,,,,101605,33870,40
+supervised,supervised_gcn,link_prediction,ogbn_arxiv,,,,,0.9636566429529428,0.9658641144500887,0.2286577992744861,0.28195716013128347,0.04652521122846306,,,
+supervised,supervised_gcn,link_prediction,euro_road,,,,,0.7505455266812141,0.7311048215874942,0.704225352112676,0.9366197183098591,0.12698767998600133,,,

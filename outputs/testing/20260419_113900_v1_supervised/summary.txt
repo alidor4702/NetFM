@@ -1,0 +1,25 @@
+
+link_prediction  —  euro_road
+──────────────────────────────────────────────────────────────────────
+        method    auc     ap  hits_50  hits_100    mrr
+supervised_gcn 0.7505 0.7311   0.7042    0.9366 0.1270
+
+link_prediction  —  lastfm_asia
+──────────────────────────────────────────────────────────────────────
+        method    auc     ap  hits_50  hits_100    mrr
+supervised_gcn 0.8742 0.9036   0.5286    0.6383 0.1508
+
+link_prediction  —  ogbn_arxiv
+──────────────────────────────────────────────────────────────────────
+        method    auc     ap  hits_50  hits_100    mrr
+supervised_gcn 0.9637 0.9659   0.2287    0.2820 0.0465
+
+node_classification  —  lastfm_asia
+──────────────────────────────────────────────────────────────────────
+        method    acc  top5_acc  macro_f1  weighted_f1
+supervised_gcn 0.6861       NaN    0.4726       0.6623
+
+node_classification  —  ogbn_arxiv
+──────────────────────────────────────────────────────────────────────
+        method    acc  top5_acc  macro_f1  weighted_f1
+supervised_gcn 0.6971       NaN    0.4674       0.6790
