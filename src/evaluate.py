@@ -296,18 +296,26 @@ def evaluate(args: argparse.Namespace) -> None:
                 print(f"\n[{args.setting}][{dname}] method=supervised_gcn (NC)")
                 try:
                     tr_full, _, te = ncls_split
-                    preds = supervised_node_classification(
+                    preds, probs = supervised_node_classification(
                         graph, labels, tr_full, te, device, verbose=args.verbose,
                     )
                     from sklearn.metrics import (
                         accuracy_score, f1_score, confusion_matrix,
+                        top_k_accuracy_score,
                     )
                     y_true = labels[te]
                     y_pred = preds[te]
                     num_classes = int(max(labels.max() + 1, y_pred.max() + 1))
+                    try:
+                        top5 = top_k_accuracy_score(
+                            y_true, probs[te], k=5,
+                            labels=np.arange(num_classes),
+                        )
+                    except Exception:
+                        top5 = float("nan")
                     res = NodeClsResult(
                         accuracy=accuracy_score(y_true, y_pred),
-                        top5_accuracy=float("nan"),
+                        top5_accuracy=float(top5),
                         macro_f1=f1_score(y_true, y_pred, average="macro", zero_division=0),
                         weighted_f1=f1_score(y_true, y_pred, average="weighted", zero_division=0),
                         per_class_f1=f1_score(y_true, y_pred, average=None, zero_division=0,

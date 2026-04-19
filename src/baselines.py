@@ -170,6 +170,48 @@ def _concat_features(graph: NetFMGraph, d: int) -> np.ndarray:
     return np.concatenate([struct, svd], axis=1).astype(np.float32)
 
 
+# Above these sizes, supervised training switches to NeighborLoader batching
+# so the backward pass fits on a 24 GB GPU.
+_SUP_BATCH_EDGE_THRESHOLD = 3_000_000
+_SUP_BATCH_NODE_THRESHOLD = 300_000
+
+
+def _sup_needs_batching(graph: NetFMGraph) -> bool:
+    return (graph.num_nodes > _SUP_BATCH_NODE_THRESHOLD
+            or int(graph.edge_index.size(1)) > _SUP_BATCH_EDGE_THRESHOLD)
+
+
+def _sup_inference_batched(
+    model: nn.Module,
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    num_layers: int,
+    out_dim: int,
+    device: torch.device,
+    batch_size: int = 4096,
+    neighbors_per_hop: int = 10,
+) -> torch.Tensor:
+    from torch_geometric.data import Data
+    from torch_geometric.loader import NeighborLoader
+    data = Data(x=x.cpu(), edge_index=edge_index.cpu())
+    loader = NeighborLoader(
+        data, num_neighbors=[neighbors_per_hop] * num_layers,
+        batch_size=batch_size,
+        input_nodes=torch.arange(num_nodes),
+        shuffle=False,
+    )
+    out = torch.empty(num_nodes, out_dim)
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            emb = model(batch.x, batch.edge_index)
+            bs = batch.batch_size
+            out[batch.input_id.cpu()] = emb[:bs].detach().cpu()
+    return out
+
+
 def supervised_node_classification(
     graph: NetFMGraph,
     labels: np.ndarray,
@@ -183,8 +225,8 @@ def supervised_node_classification(
     lr: float = 5e-3,
     weight_decay: float = 5e-4,
     verbose: bool = False,
-) -> np.ndarray:
-    """Train a small GCN supervised on labels. Returns predicted classes for every node."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Train a small GCN supervised on labels. Returns (preds, probs) for every node."""
     x = torch.from_numpy(_concat_features(graph, d)).to(device)
     ei = graph.edge_index.to(device)
     y = torch.from_numpy(labels).long().to(device)
@@ -192,8 +234,41 @@ def supervised_node_classification(
 
     model = _SupervisedGCN(x.size(1), hidden, num_classes, num_layers).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    train_t = torch.from_numpy(train_idx).long().to(device)
 
+    if _sup_needs_batching(graph):
+        from torch_geometric.data import Data
+        from torch_geometric.loader import NeighborLoader
+        print(f"    [batched] sup-gcn ncls using NeighborLoader "
+              f"(N={graph.num_nodes}, E={int(ei.size(1))})")
+        data = Data(x=x.cpu(), edge_index=ei.cpu(), y=y.cpu())
+        loader = NeighborLoader(
+            data, num_neighbors=[10] * num_layers, batch_size=512,
+            input_nodes=torch.from_numpy(train_idx).long(), shuffle=True,
+        )
+        for epoch in range(epochs):
+            model.train()
+            ep_loss, ep_n = 0.0, 0
+            for batch in loader:
+                batch = batch.to(device)
+                opt.zero_grad()
+                logits = model(batch.x, batch.edge_index)
+                bs = batch.batch_size
+                loss = F.cross_entropy(logits[:bs], batch.y[:bs])
+                loss.backward()
+                opt.step()
+                ep_loss += float(loss) * bs
+                ep_n += bs
+            if verbose and (epoch + 1) % max(1, epochs // 5) == 0:
+                print(f"    sup-gcn(batched) epoch {epoch + 1}/{epochs}  "
+                      f"loss={ep_loss / max(ep_n, 1):.4f}")
+        logits = _sup_inference_batched(
+            model, x, ei, graph.num_nodes, num_layers, num_classes, device,
+        ).to(device)
+        probs = F.softmax(logits, dim=-1).cpu().numpy()
+        preds = probs.argmax(axis=-1)
+        return preds, probs
+
+    train_t = torch.from_numpy(train_idx).long().to(device)
     for epoch in range(epochs):
         model.train()
         opt.zero_grad()
@@ -210,8 +285,9 @@ def supervised_node_classification(
     model.eval()
     with torch.no_grad():
         logits = model(x, ei)
-        preds = logits.argmax(-1).cpu().numpy()
-    return preds
+        probs = F.softmax(logits, dim=-1).cpu().numpy()
+    preds = probs.argmax(axis=-1)
+    return preds, probs
 
 
 def supervised_link_prediction(
@@ -240,8 +316,45 @@ def supervised_link_prediction(
 
     model = _SupervisedGCN(x.size(1), hidden, hidden, num_layers).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    pos_t = torch.from_numpy(np.stack([pos_train[0], pos_train[1]])).long().to(device)
 
+    if _sup_needs_batching(graph):
+        from torch_geometric.data import Data
+        from torch_geometric.loader import LinkNeighborLoader
+        print(f"    [batched] sup-gcn lp using LinkNeighborLoader "
+              f"(N={num_nodes}, E={int(train_ei.size(1))})")
+        data = Data(x=x.cpu(), edge_index=train_ei.cpu())
+        pos_edge = torch.from_numpy(np.stack([pos_train[0], pos_train[1]])).long()
+        loader = LinkNeighborLoader(
+            data, num_neighbors=[10] * num_layers, batch_size=4096,
+            edge_label_index=pos_edge,
+            edge_label=torch.ones(pos_edge.size(1)),
+            neg_sampling_ratio=1.0, shuffle=True,
+        )
+        for epoch in range(epochs):
+            model.train()
+            ep_loss, ep_n = 0.0, 0
+            for batch in loader:
+                batch = batch.to(device)
+                opt.zero_grad()
+                emb = model(batch.x, batch.edge_index)
+                s, dst = batch.edge_label_index[0], batch.edge_label_index[1]
+                scores = (emb[s] * emb[dst]).sum(-1)
+                loss = F.binary_cross_entropy_with_logits(
+                    scores, batch.edge_label.float(),
+                )
+                loss.backward()
+                opt.step()
+                ep_loss += float(loss) * s.size(0)
+                ep_n += s.size(0)
+            if verbose and (epoch + 1) % max(1, epochs // 4) == 0:
+                print(f"    sup-gcn-link(batched) epoch {epoch + 1}/{epochs}  "
+                      f"loss={ep_loss / max(ep_n, 1):.4f}")
+        emb = _sup_inference_batched(
+            model, x, train_ei, num_nodes, num_layers, hidden, device,
+        )
+        return emb.numpy().astype(np.float32)
+
+    pos_t = torch.from_numpy(np.stack([pos_train[0], pos_train[1]])).long().to(device)
     for epoch in range(epochs):
         model.train()
         opt.zero_grad()
