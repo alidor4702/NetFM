@@ -200,44 +200,66 @@ This also enables a clean **ablation study**: structural-only vs SVD-only vs com
 ### 4.1 GraphSAGE Encoder
 
 ```
-Structural features [N, 6]     → Linear(6 → d) → struct_emb [N, d]
-SVD features [N, d]            ─────────────────→ svd_emb [N, d]
-                                                       │
-                                          node_input = struct_emb + svd_emb
-                                                       │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │  BatchNorm + ReLU│
-                                              └────────┬────────┘
-                                                       │
-                                               ┌───────▼───────┐
-                                               │  SAGEConv L1  │  d → d, aggr="mean"
-                                               │  + BatchNorm  │
-                                               │  + ReLU       │
-                                               │  + Dropout    │
-                                               └───────┬───────┘
-                                                       │
-                                               ┌───────▼───────┐
-                                               │  SAGEConv L2  │  d → d
-                                               │  + BatchNorm  │
-                                               │  + ReLU       │
-                                               │  + Dropout    │
-                                               └───────┬───────┘
-                                                       │
-                                               ┌───────▼───────┐
-                                               │  SAGEConv L3  │  d → d
-                                               │  + BatchNorm  │
-                                               └───────┬───────┘
-                                                       │
-                                                       ▼
-                                        Output: [N, d] node embeddings
+Structural features [N, 6]          SVD features [N, d]
+        │                                   │
+        ▼                                   │
+ Linear(6 → d) → struct_emb [N, d]   svd_emb [N, d]
+        │                                   │
+        ▼                                   ▼
+    LayerNorm                           LayerNorm             ← per-channel norm
+        │                                   │
+        │       α = σ(mix)   (1−α)          │
+        └──── × ────┐                 ┌──── × ────┘
+                    │                 │
+                    ▼                 ▼
+                    ( + ) ──── + ──── graph_ctx = Linear(3 → d)([log N, log E, log avg_deg])
+                      │
+                      ▼
+               node_input [N, d]
+                      │
+                      ▼
+               BatchNorm + ReLU
+                      │
+              ┌───────▼───────┐
+              │  SAGEConv L1  │  d → d, aggr="mean"
+              │  + BatchNorm  │
+              │  + ReLU       │
+              │  + Dropout    │
+              └───────┬───────┘
+                      │
+              ┌───────▼───────┐
+              │  SAGEConv L2  │  d → d (same as L1)
+              └───────┬───────┘
+                      │
+              ┌───────▼───────┐
+              │  SAGEConv L3  │  d → d, BatchNorm only (no ReLU, no Dropout)
+              └───────┬───────┘
+                      │
+                      ▼
+        Output: [N, d] node embeddings
 ```
+
+**Dual-channel combination — design refinements** (not naive sum):
+
+1. **LayerNorm per channel.** Structural projection and SVD features have very different magnitudes (z-scored vs raw singular values). LayerNorm puts both on unit-variance per-node before combining so one channel doesn't drown out the other.
+
+2. **Learnable mix gate α.** A single scalar `mix` parameter, passed through sigmoid:
+   `α = σ(mix) ∈ (0, 1)`, initialized at 0.5. The encoder learns how much to weight each channel via gradients rather than hand-tuning:
+   `combined = α · struct_norm + (1 − α) · svd_norm`
+   Shared globally (not per-graph) to stay inductive.
+
+3. **Graph context `graph_ctx`.** A 256-dim vector summarizing the graph's scale and density, added to every node's input:
+   `graph_ctx = Linear(3 → d)([log N, log E, log avg_deg])`
+   where `N`, `E`, `avg_deg` come from the full-graph `edge_index` (so NeighborLoader subgraphs still see the true graph-level context). The three inputs are log-scaled so the Linear layer sees inputs on a similar order of magnitude across graphs spanning four orders of magnitude in size.
+   Derived from the graph's own topology, so it works on unseen graphs at inference (unlike a graph-id embedding, which would leak dataset identity). Gives the encoder a coarse "what kind of graph is this" signal — a degree-10 node means something different in a road network (log avg_deg ≈ 1) than in a social graph (log avg_deg ≈ 4) — without breaking zero-shot transfer.
+   *Note*: we tried `Linear(6 → d)(mean_pool(structural))`, but because `features.py` z-scores structural features per-graph at cache time, the mean is always 0 and `graph_ctx` degenerates to a single learned bias. The 3-vector formulation avoids this degeneracy.
 
 **Default hyperparameters:**
 - `d` (hidden_dim): 256 (treat as hyperparameter — ablate with 128, 512)
 - `num_layers`: 3
 - `dropout`: 0.1
 - `aggregator`: mean
+- `mix` init: 0.0 (so α = σ(0) = 0.5 at start)
 
 **Why GraphSAGE**: It's inductive — it learns aggregation functions over neighborhoods rather than fixed per-node embeddings. This means it can produce embeddings for nodes and graphs it has never seen, which is essential for a foundation model.
 
@@ -289,14 +311,25 @@ reconstruct them from the GNN embedding (which aggregates neighborhood info),
 not just memorize the input — especially since 15% of inputs are masked.
 ```
 
-#### Combined Loss
+#### Combined Loss — Uncertainty Weighting (Kendall et al. 2018)
+
+Hand-tuning `λ`'s is fragile: the mask head outputs 262 dims with MSE while the link head outputs 1 scalar with BCE — their raw magnitudes can differ by 10–100×. Rather than guessing weights, we learn them via uncertainty weighting:
 
 ```
-L = λ₁ · L_mask + λ₂ · L_link + λ₃ · L_subgraph
+Each head i gets a learnable log-variance parameter s_i.
+Effective loss per head:   (1 / (2 · exp(2·s_i))) · L_i   +   s_i
+                            ↑                               ↑
+                    downweight noisy heads          regularizer on s_i
 
-Default: λ₁ = λ₂ = λ₃ = 1.0
-Tuned on validation split (random 10% of pre-training graphs held aside for loss monitoring).
+Total:
+  L = (0.5 · exp(−2·s_mask)) · L_mask + s_mask
+    + (0.5 · exp(−2·s_link)) · L_link + s_link
+    + (0.5 · exp(−2·s_sub))  · L_sub  + s_sub
 ```
+
+The model learns per-head `s_i` during pre-training. Heads with intrinsically noisier losses get downweighted automatically; heads with crisp gradients get more influence. +3 learnable scalars, no manual tuning.
+
+**Validation split:** 10% of pre-training graphs held aside for loss monitoring (not weight updates).
 
 ### 4.3 Training Configuration
 
@@ -309,6 +342,33 @@ Tuned on validation split (random 10% of pre-training graphs held aside for loss
 | Epochs          | 100       |
 | Batch size      | 256 (for NeighborLoader on large graphs) |
 | GPU             | RTX 3090 (24GB VRAM) |
+
+#### Graph Sampling Across the Pre-training Corpus
+
+The 10 pre-training graphs span 4 orders of magnitude in node count (power_grid 4.9K → dblp_snap 317K) and ~4 in edge count. Naive uniform sampling over epochs would have dblp_snap dominate and power_grid get overfit within a few epochs.
+
+**Fix — `sqrt(N)`-weighted graph sampling:**
+
+At each training step, pick which graph to sample from with probability proportional to `sqrt(num_nodes)`. Square-root smoothing keeps the largest graph from dominating (proteins is 26× larger than cora, but only `sqrt(26) ≈ 5×` more likely to be sampled) while still giving big graphs meaningfully more compute than small ones.
+
+```python
+weights = np.array([sqrt(g.num_nodes) for g in pretrain_graphs])
+weights /= weights.sum()
+# each step:
+graph_idx = np.random.choice(len(pretrain_graphs), p=weights)
+```
+
+**Per-graph batching strategy:**
+
+| Graph size | Strategy | Fanout |
+|---|---|---|
+| ≤ 20K nodes | full-batch forward | — |
+| 20K – 200K nodes | `NeighborLoader`, 256 seed nodes | `[15, 10, 5]` |
+| > 200K nodes OR avg degree > 100 | `NeighborLoader`, 256 seeds, reduced fanout | `[5, 3, 2]` or smaller |
+
+Effective subgraph size per step is ~3K–10K nodes regardless of full-graph size. This bounds GPU memory and ensures every step is a balanced mixture of contexts.
+
+**Interleaving:** graphs are sampled **per step**, not per epoch. One gradient update can be on Cora, the next on ogbn-proteins. This prevents the model from overfitting to one domain before seeing others.
 
 ---
 
