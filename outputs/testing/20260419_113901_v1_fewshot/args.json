@@ -1,0 +1,18 @@
+{
+  "checkpoint": "outputs/training/20260419_004517_v1/encoder.pt",
+  "methods": "random,structural,svd,netfm,node2vec",
+  "datasets": "lastfm_asia,ogbn_arxiv,ogbn_proteins,euro_road,ogbn_mag",
+  "setting": "few_shot",
+  "k_per_class": 10,
+  "ft_epochs_nc": 100,
+  "ft_epochs_lp": 50,
+  "ft_lr": 0.0005,
+  "ft_wd": 0.0005,
+  "ft_head_hidden": 0,
+  "held_frac": 0.1,
+  "include_supervised": false,
+  "outputs_root": "outputs/testing",
+  "run_name": "v1_fewshot",
+  "verbose": false,
+  "seed": 0
+}
