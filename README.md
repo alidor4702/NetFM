@@ -6,10 +6,6 @@ checkpoint, many downstream uses: link prediction, community detection, and
 node classification on held-out graphs spanning social, citation, biological,
 infrastructure and collaboration domains.
 
-> *Final project — Machine Learning in Network Science (CentraleSupélec, 2026).
-> Authors: Ali Dor, Elora Drouilhet, Henri Bonamy, Zaynab Raounak.
-> Instructor: Prof. Fragkiskos Malliaros.*
-
 ---
 
 ## Table of contents
@@ -23,7 +19,7 @@ infrastructure and collaboration domains.
 7. [Interactive visualizer](#interactive-visualizer)
 8. [Quickstart](#quickstart)
 9. [Repository layout](#repository-layout)
-10. [Citation & acknowledgments](#citation--acknowledgments)
+10. [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -377,32 +373,16 @@ NetFM/
 │   ├── testing/<run>/     # results.csv + plots/ per evaluation run
 │   ├── results_summary.md # plain-language write-up of every result
 │   └── testing/final_*    # aggregated leaderboard and comparison plots
-├── figures/
-│   ├── data/              # cached structural + SVD features per dataset
-│   └── layouts/           # cached 2D/3D coordinates for the visualizer
-└── report/                # LaTeX report + figures (not distributed here)
+└── figures/
+    ├── data/              # cached structural + SVD features per dataset
+    └── layouts/           # cached 2D/3D coordinates for the visualizer
 ```
 
 ---
 
-## Citation & acknowledgments
+## Acknowledgments
 
-If this repository is useful for your own work:
-
-```bibtex
-@unpublished{netfm2026,
-  title  = {NetFM: A Graph Foundation Model for Cross-Domain Network Science},
-  author = {Dor, Ali and Drouilhet, Elora and Bonamy, Henri and Raounak, Zaynab},
-  note   = {Machine Learning in Network Science, CentraleSupélec},
-  year   = {2026}
-}
-```
-
-We thank **Prof. Fragkiskos Malliaros** for the Machine Learning in Network
-Science course and project framing, and the authors of PyTorch Geometric,
-the Open Graph Benchmark, SNAP, and NetworkX for the datasets and tooling
-this project builds on.
-
----
+Built on top of PyTorch Geometric, the Open Graph Benchmark, SNAP, and
+NetworkX for datasets and tooling.
 
 *License: MIT (see `pyproject.toml`).*
