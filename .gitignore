@@ -5,12 +5,13 @@ dist/
 build/
 .venv/
 venv/
-*.pt
 *.pth
 *.ckpt
 /data/
 logs/
-outputs/
+outputs/*
+!outputs/training/
+!outputs/testing/
 wandb/
 *.log
 .ipynb_checkpoints/
