@@ -1,0 +1,11 @@
+{
+  "checkpoint": "outputs/training/20260419_004517_v1/encoder.pt",
+  "methods": "random,structural,svd,netfm,node2vec",
+  "datasets": "lastfm_asia,ogbn_arxiv,ogbn_proteins,euro_road,ogbn_mag",
+  "held_frac": 0.1,
+  "include_supervised": false,
+  "outputs_root": "outputs/testing",
+  "run_name": "v1",
+  "verbose": false,
+  "seed": 0
+}
