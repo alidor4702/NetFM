@@ -194,7 +194,7 @@ def _sup_inference_batched(
 ) -> torch.Tensor:
     from torch_geometric.data import Data
     from torch_geometric.loader import NeighborLoader
-    data = Data(x=x.cpu(), edge_index=edge_index.cpu())
+    data = Data(x=x.cpu(), edge_index=edge_index.cpu().contiguous())
     loader = NeighborLoader(
         data, num_neighbors=[neighbors_per_hop] * num_layers,
         batch_size=batch_size,
@@ -240,7 +240,7 @@ def supervised_node_classification(
         from torch_geometric.loader import NeighborLoader
         print(f"    [batched] sup-gcn ncls using NeighborLoader "
               f"(N={graph.num_nodes}, E={int(ei.size(1))})")
-        data = Data(x=x.cpu(), edge_index=ei.cpu(), y=y.cpu())
+        data = Data(x=x.cpu(), edge_index=ei.cpu().contiguous(), y=y.cpu())
         loader = NeighborLoader(
             data, num_neighbors=[10] * num_layers, batch_size=512,
             input_nodes=torch.from_numpy(train_idx).long(), shuffle=True,
@@ -322,7 +322,7 @@ def supervised_link_prediction(
         from torch_geometric.loader import LinkNeighborLoader
         print(f"    [batched] sup-gcn lp using LinkNeighborLoader "
               f"(N={num_nodes}, E={int(train_ei.size(1))})")
-        data = Data(x=x.cpu(), edge_index=train_ei.cpu())
+        data = Data(x=x.cpu(), edge_index=train_ei.cpu().contiguous())
         pos_edge = torch.from_numpy(np.stack([pos_train[0], pos_train[1]])).long()
         loader = LinkNeighborLoader(
             data, num_neighbors=[10] * num_layers, batch_size=4096,

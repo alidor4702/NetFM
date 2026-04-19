@@ -105,7 +105,7 @@ def _encode_batched_inference(
     sd = struct.size(1)
     data = Data(
         x=torch.cat([struct.cpu(), svd.cpu()], dim=-1),
-        edge_index=edge_index.cpu(),
+        edge_index=edge_index.cpu().contiguous(),
     )
     loader = NeighborLoader(
         data,
@@ -150,7 +150,7 @@ def _train_nc_batched(
     sd = struct.size(1)
     data = Data(
         x=torch.cat([struct.cpu(), svd.cpu()], dim=-1),
-        edge_index=edge_index.cpu(),
+        edge_index=edge_index.cpu().contiguous(),
         y=labels_t.cpu(),
     )
     loader = NeighborLoader(
@@ -205,7 +205,7 @@ def _train_lp_batched(
     sd = struct.size(1)
     data = Data(
         x=torch.cat([struct.cpu(), svd.cpu()], dim=-1),
-        edge_index=edge_index.cpu(),
+        edge_index=edge_index.cpu().contiguous(),
     )
     pos_edge = torch.stack([
         torch.from_numpy(pos_src).long(),
