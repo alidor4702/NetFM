@@ -1867,6 +1867,387 @@ def _make_qt_classes():
             self.addItem(self._selection_marker)
 
     # ------------------------------------------------------------------
+    # Model testing — view, sidebar, stats panel
+    # ------------------------------------------------------------------
+    class ModelTestView2D(pg.PlotWidget):
+        """2D view dedicated to the Model Testing mode.
+
+        Displays a fixed set of (coords, edges) and lets the caller swap frames:
+        each frame changes per-node colors/sizes and optionally overlays
+        extra edges (e.g. predicted positives in green, false positives in red).
+        """
+        def __init__(self, parent=None):
+            super().__init__(parent=parent)
+            self.setBackground(BG_DARK)
+            pi = self.getPlotItem()
+            pi.hideAxis("bottom"); pi.hideAxis("left")
+            pi.getViewBox().setAspectLocked(True)
+            pi.setMenuEnabled(False)
+            pi.setMouseEnabled(True, True)
+            self._coords: Optional[np.ndarray] = None
+            self._edges_base: Optional[np.ndarray] = None
+            self._edge_base_item = None
+            self._edge_hidden_item = None
+            self._edge_pred_pos_item = None
+            self._edge_pred_neg_item = None
+            self._scatter: Optional[pg.ScatterPlotItem] = None
+
+            self._banner = pg.TextItem("", color=TEXT, anchor=(0, 0),
+                                        fill=pg.mkBrush(22, 28, 36, 230),
+                                        border=pg.mkPen(PANEL_BORDER))
+            self._banner.setZValue(800)
+            self.addItem(self._banner)
+
+        def _clear(self):
+            pi = self.getPlotItem()
+            pi.clear()
+            self.addItem(self._banner)
+
+        def set_graph(self, coords: np.ndarray, edges_base: np.ndarray):
+            """Install the underlying graph once. Frames overlay on top."""
+            self._clear()
+            self._coords = coords
+            self._edges_base = edges_base
+            self._edge_base_item = self._draw_edges(edges_base, "#404a5a", 1.4, 90)
+            self._edge_hidden_item = self._draw_edges(
+                np.zeros((2, 0), dtype=np.int64), "#7a6a2a", 1.6, 120,
+                dashed=True,
+            )
+            self._edge_pred_pos_item = self._draw_edges(
+                np.zeros((2, 0), dtype=np.int64), "#5cb85c", 2.4, 220,
+            )
+            self._edge_pred_neg_item = self._draw_edges(
+                np.zeros((2, 0), dtype=np.int64), "#d9534f", 2.4, 220,
+            )
+            # initial scatter (neutral)
+            n = len(coords)
+            self._scatter = pg.ScatterPlotItem(
+                pos=coords, size=np.full(n, 14.0),
+                brush=pg.mkBrush(150, 170, 190, 220),
+                pen=pg.mkPen(color="#0b1014", width=0.8), hoverable=False,
+            )
+            self._scatter.setZValue(300)
+            self.addItem(self._scatter)
+            r = float(np.max(np.abs(coords))) if n else 1.0
+            pi = self.getPlotItem()
+            pi.getViewBox().setRange(
+                xRange=(-r * 1.1, r * 1.1),
+                yRange=(-r * 1.1, r * 1.1), padding=0,
+            )
+            # banner placement (top-left in data coords)
+            self._banner.setPos(-r * 1.05, r * 1.05)
+
+        def _draw_edges(self, edges: np.ndarray, color_hex: str,
+                        width: float, alpha: int, dashed: bool = False):
+            coords = self._coords
+            if coords is None:
+                return None
+            if edges.size == 0:
+                item = pg.PlotDataItem([], [], connect="pairs",
+                                         pen=pg.mkPen(
+                                             color=(*hex_to_rgba(color_hex)[:3], alpha),
+                                             width=width,
+                                             style=QtCore.Qt.DashLine if dashed else QtCore.Qt.SolidLine))
+                item.setZValue(100)
+                self.addItem(item)
+                return item
+            x = np.empty(2 * edges.shape[1])
+            y = np.empty(2 * edges.shape[1])
+            x[0::2] = coords[edges[0], 0]; x[1::2] = coords[edges[1], 0]
+            y[0::2] = coords[edges[0], 1]; y[1::2] = coords[edges[1], 1]
+            r, g, b, _ = hex_to_rgba(color_hex)
+            item = pg.PlotDataItem(
+                x, y, connect="pairs",
+                pen=pg.mkPen(color=(r, g, b, alpha), width=width,
+                             style=QtCore.Qt.DashLine if dashed else QtCore.Qt.SolidLine),
+            )
+            item.setZValue(150)
+            self.addItem(item)
+            return item
+
+        def _replace_edge_layer(self, attr: str, edges: np.ndarray,
+                                color_hex: str, width: float,
+                                alpha: int, dashed: bool = False):
+            old = getattr(self, attr, None)
+            if old is not None:
+                try:
+                    self.removeItem(old)
+                except Exception:
+                    pass
+            new_item = self._draw_edges(edges, color_hex, width, alpha, dashed=dashed)
+            setattr(self, attr, new_item)
+
+        def set_nc_frame(self, frame, banner_text: str):
+            """Apply a NodeClsFrame: recolor nodes."""
+            if self._scatter is None:
+                return
+            colors = frame.node_colors
+            brushes = [pg.mkBrush(int(c[0]*255), int(c[1]*255), int(c[2]*255), int(c[3]*255))
+                       for c in colors]
+            self._scatter.setData(
+                pos=self._coords, size=frame.node_sizes, brush=brushes,
+                pen=pg.mkPen(color="#0b1014", width=0.8),
+            )
+            self._banner.setHtml(banner_text)
+
+        def set_lp_frame(self, frame, banner_text: str):
+            """Apply a LinkPredFrame: recolor nodes + swap edge overlays."""
+            if self._scatter is None:
+                return
+            self._replace_edge_layer(
+                "_edge_hidden_item", frame.edges_hidden,
+                "#c4a44c", 2.0, 220, dashed=True,
+            )
+            self._replace_edge_layer(
+                "_edge_pred_pos_item", frame.edges_pred_pos,
+                "#5cb85c", 2.6, 235,
+            )
+            self._replace_edge_layer(
+                "_edge_pred_neg_item", frame.edges_pred_neg,
+                "#d9534f", 2.6, 235,
+            )
+            n = len(self._coords)
+            brushes = [pg.mkBrush(150, 170, 190, 220) for _ in range(n)]
+            self._scatter.setData(
+                pos=self._coords, size=frame.node_sizes, brush=brushes,
+                pen=pg.mkPen(color="#0b1014", width=0.8),
+            )
+            self._banner.setHtml(banner_text)
+
+
+    class TestingSidebar(QtWidgets.QFrame):
+        test_requested = QtCore.Signal(dict)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("sidebar")
+            self.setMinimumWidth(310)
+            self.setMaximumWidth(380)
+            root = QtWidgets.QVBoxLayout(self)
+            root.setContentsMargins(16, 16, 16, 16)
+            root.setSpacing(10)
+
+            title = QtWidgets.QLabel("▮ NETFM ▮ MODEL TESTING")
+            title.setProperty("role", "title")
+            sub = QtWidgets.QLabel("  // evaluate any encoder on held-out graphs")
+            sub.setProperty("role", "subtitle")
+            root.addWidget(title)
+            root.addWidget(sub)
+
+            # -- model
+            root.addWidget(self._section("MODEL / BASELINE"))
+            self.model_combo = QtWidgets.QComboBox()
+            self._models: list = []
+            self._populate_models()
+            root.addWidget(self.model_combo)
+            self.refresh_btn = QtWidgets.QPushButton("↻ refresh checkpoint list")
+            self.refresh_btn.setProperty("role", "secondary")
+            self.refresh_btn.clicked.connect(self._populate_models)
+            root.addWidget(self.refresh_btn)
+
+            # -- task
+            root.addWidget(self._section("TASK"))
+            self.task_combo = QtWidgets.QComboBox()
+            self.task_combo.addItems(["Node classification", "Link prediction"])
+            root.addWidget(self.task_combo)
+
+            # -- dataset
+            root.addWidget(self._section("DATASET"))
+            self.dataset_combo = QtWidgets.QComboBox()
+            try:
+                from src.testing_engine import available_datasets
+                self.dataset_combo.addItems(available_datasets())
+            except Exception:
+                pass
+            root.addWidget(self.dataset_combo)
+
+            # -- sampling for visual size
+            root.addWidget(self._section("SAMPLING (DISPLAY)"))
+            self.sample_spin = QtWidgets.QSpinBox()
+            self.sample_spin.setRange(50, 5000)
+            self.sample_spin.setSingleStep(100)
+            self.sample_spin.setValue(600)
+            root.addWidget(QtWidgets.QLabel("Visualized subgraph size"))
+            root.addWidget(self.sample_spin)
+
+            self.layout_combo = QtWidgets.QComboBox()
+            self.layout_combo.addItems(list(LAYOUTS.keys()))
+            self.layout_combo.setCurrentText("spring")
+            root.addWidget(QtWidgets.QLabel("Layout"))
+            root.addWidget(self.layout_combo)
+
+            self.sampler_combo = QtWidgets.QComboBox()
+            self.sampler_combo.addItems(list(SAMPLERS.keys()))
+            self.sampler_combo.setCurrentText("ego")
+            root.addWidget(QtWidgets.QLabel("Sampler"))
+            root.addWidget(self.sampler_combo)
+
+            # -- run
+            root.addStretch(1)
+            self.run_btn = QtWidgets.QPushButton("▶ Run test")
+            self.run_btn.clicked.connect(self._emit)
+            root.addWidget(self.run_btn)
+
+            self.status = QtWidgets.QLabel("")
+            self.status.setProperty("role", "muted")
+            self.status.setWordWrap(True)
+            root.addWidget(self.status)
+
+        def _section(self, title):
+            lab = QtWidgets.QLabel(title)
+            lab.setProperty("role", "section")
+            return lab
+
+        def _populate_models(self):
+            from src.testing_engine import list_models
+            self._models = list_models()
+            self.model_combo.clear()
+            for m in self._models:
+                self.model_combo.addItem(m.label)
+
+        def _emit(self):
+            if not self._models:
+                self.status.setText("⚠ no models available")
+                return
+            idx = max(self.model_combo.currentIndex(), 0)
+            task_txt = self.task_combo.currentText()
+            task = "node_classification" if task_txt.startswith("Node") else "link_prediction"
+            self.test_requested.emit({
+                "model": self._models[idx],
+                "task": task,
+                "dataset": self.dataset_combo.currentText(),
+                "sample_size": self.sample_spin.value(),
+                "layout": self.layout_combo.currentText(),
+                "sampler": self.sampler_combo.currentText(),
+            })
+
+        def set_busy(self, busy: bool, text: str = ""):
+            self.run_btn.setDisabled(busy)
+            self.run_btn.setText("Running…" if busy else "▶ Run test")
+            if text:
+                self.status.setText(text)
+
+
+    class TestingPanel(QtWidgets.QFrame):
+        """Right-side panel: frame controls + metrics."""
+        frame_changed = QtCore.Signal(int)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setObjectName("legendPanel")
+            self.setMinimumWidth(300)
+            v = QtWidgets.QVBoxLayout(self)
+            v.setContentsMargins(12, 12, 12, 12)
+            v.setSpacing(8)
+
+            # frame controls
+            hdr = QtWidgets.QLabel("▎ FRAME")
+            hdr.setProperty("role", "section")
+            v.addWidget(hdr)
+            row = QtWidgets.QHBoxLayout()
+            self.prev_btn = QtWidgets.QPushButton("◀")
+            self.play_btn = QtWidgets.QPushButton("▶ Play")
+            self.next_btn = QtWidgets.QPushButton("▶")
+            for b in (self.prev_btn, self.play_btn, self.next_btn):
+                b.setProperty("role", "secondary")
+            self.prev_btn.clicked.connect(lambda: self._step(-1))
+            self.next_btn.clicked.connect(lambda: self._step(+1))
+            self.play_btn.clicked.connect(self._play)
+            row.addWidget(self.prev_btn)
+            row.addWidget(self.play_btn, 1)
+            row.addWidget(self.next_btn)
+            w = QtWidgets.QWidget(); w.setLayout(row)
+            v.addWidget(w)
+
+            self.frame_lbl = QtWidgets.QLabel("no test loaded")
+            self.frame_lbl.setWordWrap(True)
+            v.addWidget(self.frame_lbl)
+
+            v.addWidget(self._section("METRICS"))
+            self._stats_box = QtWidgets.QVBoxLayout()
+            self._stats_box.setSpacing(3)
+            inner = QtWidgets.QWidget(); inner.setLayout(self._stats_box)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(inner)
+            v.addWidget(scroll, 1)
+
+            self._frames = []
+            self._current = 0
+            self._timer = QtCore.QTimer(self)
+            self._timer.setInterval(1400)
+            self._timer.timeout.connect(self._tick)
+
+        def _section(self, title):
+            lab = QtWidgets.QLabel(title)
+            lab.setProperty("role", "section")
+            return lab
+
+        def set_frames(self, frames: list):
+            self._frames = frames
+            self._current = 0
+            self._apply()
+
+        def _step(self, d):
+            if not self._frames:
+                return
+            self._current = (self._current + d) % len(self._frames)
+            self._apply()
+
+        def _play(self):
+            if self._timer.isActive():
+                self._timer.stop()
+                self.play_btn.setText("▶ Play")
+            else:
+                if not self._frames:
+                    return
+                self._timer.start()
+                self.play_btn.setText("⏸ Pause")
+
+        def _tick(self):
+            self._current = (self._current + 1) % len(self._frames)
+            if self._current == 0:
+                self._timer.stop()
+                self.play_btn.setText("▶ Play")
+            self._apply()
+
+        def _apply(self):
+            while self._stats_box.count():
+                it = self._stats_box.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.deleteLater()
+            if not self._frames:
+                self.frame_lbl.setText("no test loaded")
+                return
+            f = self._frames[self._current]
+            self.frame_lbl.setText(
+                f"<b>{f.title}</b><br>"
+                f"<span style='color:{MUTED}'>"
+                f"step {self._current + 1} / {len(self._frames)}</span><br>"
+                f"{f.subtitle}"
+            )
+            for k, v in f.stats:
+                line = QtWidgets.QLabel(
+                    f"<span style='color:{MUTED}'>{k}</span>  "
+                    f"<span style='font-weight:600'>{v}</span>"
+                )
+                line.setTextFormat(QtCore.Qt.RichText)
+                line.setWordWrap(True)
+                self._stats_box.addWidget(line)
+            self._stats_box.addStretch(1)
+            self.frame_changed.emit(self._current)
+
+        def current_frame_index(self):
+            return self._current
+
+        def current_frame(self):
+            if not self._frames:
+                return None
+            return self._frames[self._current]
+
+
+    # ------------------------------------------------------------------
     # Sidebar
     # ------------------------------------------------------------------
     class Sidebar(QtWidgets.QFrame):
@@ -2071,9 +2452,15 @@ def _make_qt_classes():
             self.resize(1500, 900)
             self.setStyleSheet(_STYLE)
 
-            splitter = QtWidgets.QSplitter(self)
+            self.tabs = QtWidgets.QTabWidget(self)
+            self.setCentralWidget(self.tabs)
+
+            # ----- Tab 1: Graph Visualization -----
+            tab1 = QtWidgets.QWidget()
+            tab1_layout = QtWidgets.QVBoxLayout(tab1)
+            tab1_layout.setContentsMargins(0, 0, 0, 0)
+            splitter = QtWidgets.QSplitter(tab1)
             splitter.setHandleWidth(6)
-            self.setCentralWidget(splitter)
 
             self.sidebar = Sidebar()
             splitter.addWidget(self.sidebar)
@@ -2096,9 +2483,47 @@ def _make_qt_classes():
             splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
             splitter.setStretchFactor(2, 0)
+            tab1_layout.addWidget(splitter)
+            self.tabs.addTab(tab1, "Graph Visualization")
+
+            # ----- Tab 2: Model Testing -----
+            tab2 = QtWidgets.QWidget()
+            tab2_layout = QtWidgets.QVBoxLayout(tab2)
+            tab2_layout.setContentsMargins(0, 0, 0, 0)
+            tsplit = QtWidgets.QSplitter(tab2)
+            tsplit.setHandleWidth(6)
+
+            self.testing_sidebar = TestingSidebar()
+            tsplit.addWidget(self.testing_sidebar)
+
+            self.testing_container = QtWidgets.QWidget()
+            self.testing_layout = QtWidgets.QVBoxLayout(self.testing_container)
+            self.testing_layout.setContentsMargins(6, 6, 6, 6)
+            self.testing_placeholder = QtWidgets.QLabel(
+                "Pick a model + task + dataset on the left\n"
+                "and click <b>Run test</b>.")
+            self.testing_placeholder.setAlignment(QtCore.Qt.AlignCenter)
+            self.testing_placeholder.setStyleSheet(f"color: {MUTED}; font-size: 14px;")
+            self.testing_layout.addWidget(self.testing_placeholder)
+            tsplit.addWidget(self.testing_container)
+
+            self.testing_panel = TestingPanel()
+            tsplit.addWidget(self.testing_panel)
+            tsplit.setSizes([340, 900, 320])
+            tsplit.setStretchFactor(0, 0)
+            tsplit.setStretchFactor(1, 1)
+            tsplit.setStretchFactor(2, 0)
+            tab2_layout.addWidget(tsplit)
+            self.tabs.addTab(tab2, "Model Testing")
 
             self.current_view = None
+            self.current_test_view: Optional[ModelTestView2D] = None
+            self._current_test = None  # NodeClsTest | LinkPredTest
+            self._current_task: str = ""
+
             self.sidebar.render_requested.connect(self._render)
+            self.testing_sidebar.test_requested.connect(self._run_test)
+            self.testing_panel.frame_changed.connect(self._apply_frame)
 
         def _swap_view(self, new_widget):
             while self.graph_layout.count():
@@ -2161,6 +2586,112 @@ def _make_qt_classes():
                 return f"cluster {int(label_id)}"
             return f"bucket {int(label_id)}"
 
+        # -------- Model Testing mode --------
+        def _swap_test_view(self, new_widget):
+            while self.testing_layout.count():
+                it = self.testing_layout.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.deleteLater()
+            self.testing_layout.addWidget(new_widget, 1)
+            self.current_test_view = new_widget
+
+        def _run_test(self, opts: dict):
+            import torch as _torch
+            from src import testing_engine
+
+            self.testing_sidebar.set_busy(True, "loading dataset…")
+            QtWidgets.QApplication.processEvents()
+            device = _torch.device(
+                "cuda" if _torch.cuda.is_available() else "cpu"
+            )
+
+            try:
+                # Build a visualization bundle so we get coords + sampled ids.
+                source = load_registry_dataset(opts["dataset"])
+                def prog(msg):
+                    self.testing_sidebar.status.setText(msg)
+                    QtWidgets.QApplication.processEvents()
+                bundle = build_bundle(
+                    source, 2, opts["sampler"], opts["sample_size"],
+                    opts["layout"], "class",
+                    spacing=1.5, progress=prog,
+                )
+                coords2 = bundle.coords
+                # Center coords
+                coords2 = coords2 - coords2.mean(axis=0)
+
+                task = opts["task"]
+                self._current_task = task
+                if task == "node_classification":
+                    prog("running node classification")
+                    test = testing_engine.build_nc_test(
+                        opts["model"], opts["dataset"], bundle.keep_ids,
+                        device, progress=prog,
+                    )
+                    if test is None:
+                        raise RuntimeError(
+                            "Node classification unavailable for this "
+                            "(model, dataset) combo (missing labels or "
+                            "degenerate features)."
+                        )
+                    view = ModelTestView2D()
+                    view.set_graph(coords2, bundle.edge_index)
+                    self._swap_test_view(view)
+                    self._current_test = test
+                    self.testing_panel.set_frames(test.frames)
+                    self._apply_frame(self.testing_panel.current_frame_index())
+                else:
+                    prog("running link prediction")
+                    test = testing_engine.build_lp_test(
+                        opts["model"], opts["dataset"], bundle.keep_ids,
+                        device, progress=prog,
+                    )
+                    if test is None:
+                        raise RuntimeError(
+                            "Link prediction unavailable (degenerate "
+                            "features or missing edges)."
+                        )
+                    view = ModelTestView2D()
+                    # For LP, show the non-held-out edges as base
+                    # and empty scatter-color; frame 1 shows dashed held-out.
+                    base = np.concatenate(
+                        [test.edges_sample_local, test.held_pos_local],
+                        axis=1,
+                    ) if test.held_pos_local.size else test.edges_sample_local
+                    view.set_graph(coords2, test.edges_sample_local)
+                    self._swap_test_view(view)
+                    self._current_test = test
+                    self.testing_panel.set_frames(test.frames)
+                    self._apply_frame(self.testing_panel.current_frame_index())
+
+                self.testing_sidebar.set_busy(
+                    False,
+                    f"✓ {opts['model'].label} on {opts['dataset']} "
+                    f"({task})"
+                )
+            except Exception as ex:
+                import traceback
+                traceback.print_exc()
+                self.testing_sidebar.set_busy(
+                    False, f"⚠ {type(ex).__name__}: {ex}"
+                )
+
+        def _apply_frame(self, idx: int):
+            if self._current_test is None or self.current_test_view is None:
+                return
+            frame = self._current_test.frames[idx]
+            banner = (
+                f"<span style='font-size:14px;font-weight:700;color:{ACCENT};'>"
+                f"{frame.title}</span><br>"
+                f"<span style='color:{TEXT};'>{self._current_test.model_label}</span>"
+                f" · <span style='color:{MUTED};'>{self._current_test.dataset}</span>"
+            )
+            if self._current_task == "node_classification":
+                self.current_test_view.set_nc_frame(frame, banner)
+            else:
+                self.current_test_view.set_lp_frame(frame, banner)
+
     return {
         "LegendPanel": LegendPanel,
         "StatsPanel": StatsPanel,
@@ -2168,6 +2699,9 @@ def _make_qt_classes():
         "InfoPanel": InfoPanel,
         "GraphView2D": GraphView2D,
         "GraphView3D": GraphView3D,
+        "ModelTestView2D": ModelTestView2D,
+        "TestingSidebar": TestingSidebar,
+        "TestingPanel": TestingPanel,
         "Sidebar": Sidebar,
         "MainWindow": MainWindow,
     }
@@ -2185,6 +2719,8 @@ def main():
     parser.add_argument("--layout", default="spring", choices=list(LAYOUTS.keys()))
     parser.add_argument("--sample", default="ego", choices=list(SAMPLERS.keys()))
     parser.add_argument("--size", type=int, default=DEFAULT_SAMPLE)
+    parser.add_argument("--mode", default="graph", choices=["graph", "testing"],
+                        help="Open directly in graph view or model-testing tab")
     args = parser.parse_args()
 
     try:
@@ -2202,6 +2738,9 @@ def main():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = MainWindow()
     win.show()
+
+    if args.mode == "testing":
+        win.tabs.setCurrentIndex(1)
 
     if args.dataset is not None:
         # pre-fill sidebar and kick off a render
