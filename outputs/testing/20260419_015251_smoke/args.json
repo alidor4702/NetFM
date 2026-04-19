@@ -1,0 +1,11 @@
+{
+  "checkpoint": "outputs/training/20260419_004517_v1/encoder.pt",
+  "methods": "netfm,structural,svd,random,node2vec",
+  "datasets": "lastfm_asia",
+  "held_frac": 0.1,
+  "include_supervised": false,
+  "outputs_root": "outputs/testing",
+  "run_name": "smoke",
+  "verbose": false,
+  "seed": 0
+}
